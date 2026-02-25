@@ -10,7 +10,12 @@ primary_region = "nrt"  # Tokyo — lowest latency to Binance
   LIVE_TRADING = "false"
   LOG_LEVEL = "INFO"
 
-# No HTTP service — background worker only
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+
 [processes]
   trader = "python -u main.py --testnet"
 

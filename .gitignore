@@ -57,6 +57,8 @@ data/
 htmlcov/
 coverage/
 *.bun-build
+.next/
+.vercel/
 
 # ── Trading engine specifics ──
 openclaw/extensions/trading-engine/python/binance/logs/

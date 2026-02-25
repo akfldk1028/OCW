@@ -1273,6 +1273,16 @@ class CryptoRunner:
             asyncio.create_task(self._heartbeat_loop(), name="heartbeat"),
             asyncio.create_task(self._watchdog_loop(), name="watchdog"),
         ]
+
+        # Dashboard API (optional, non-fatal if port in use)
+        try:
+            from api import start_api_server
+            api_port = int(os.environ.get("API_PORT", "8080"))
+            self._tasks.append(
+                asyncio.create_task(start_api_server(self, port=api_port), name="api_server")
+            )
+        except Exception as exc:
+            logger.warning("[runner] Dashboard API failed to start: %s", exc)
         try:
             results = await asyncio.gather(*self._tasks, return_exceptions=True)
             # Log any task that died with an exception
