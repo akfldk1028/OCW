@@ -1,0 +1,40 @@
+{
+  "id": "trading-engine",
+  "name": "AI Trading Engine",
+  "description": "FinRL-based ensemble trading with PPO+A2C+DDPG and automatic risk management",
+  "uiHints": {
+    "pythonPath": {
+      "label": "Python Path",
+      "help": "Leave empty for auto-detection",
+      "placeholder": "/usr/bin/python3"
+    },
+    "serverPort": {
+      "label": "Server Port",
+      "help": "Port for the FinRL backend server"
+    },
+    "autoStart": {
+      "label": "Auto Start",
+      "help": "Start Python server automatically when gateway starts"
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "pythonPath": {
+        "type": "string",
+        "description": "Path to Python executable (default: auto-detect)"
+      },
+      "serverPort": {
+        "type": "number",
+        "default": 8787,
+        "description": "Port for the FinRL FastAPI server"
+      },
+      "autoStart": {
+        "type": "boolean",
+        "default": true,
+        "description": "Auto-start Python server on gateway startup"
+      }
+    }
+  }
+}

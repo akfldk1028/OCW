@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>OpenClaw Trading Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a1a; color: #e0e0e0; font-family: 'Consolas', 'Monaco', monospace; }
+
+        /* Toolbar */
+        #toolbar {
+            display: flex; align-items: center; gap: 10px;
+            padding: 8px 16px; background: #111128;
+            border-bottom: 1px solid #1e1e3a;
+        }
+        #toolbar select, #toolbar button {
+            padding: 5px 10px; background: #1a1a3e; color: #c0c0e0;
+            border: 1px solid #2a2a5a; border-radius: 4px; font-size: 13px; cursor: pointer;
+        }
+        #toolbar button { background: #2a2a6a; }
+        #toolbar button:hover { background: #3a3a8a; }
+        .status { font-size: 12px; padding: 3px 8px; border-radius: 10px; }
+        .status.live { background: #00331a; color: #00ff88; }
+        .status.off  { background: #331a1a; color: #ff4444; }
+        #price { margin-left: auto; font-size: 18px; font-weight: bold; color: #ffd700; }
+        #pnl { font-size: 13px; margin-left: 8px; }
+        .pnl-pos { color: #00ff88; }
+        .pnl-neg { color: #ff4444; }
+
+        /* Layout */
+        #main { display: flex; height: calc(100vh - 40px); }
+        #chart-container { flex: 1; }
+
+        /* Sidebar */
+        #sidebar {
+            width: 280px; background: #0d0d20; border-left: 1px solid #1e1e3a;
+            overflow-y: auto; padding: 12px; font-size: 12px;
+        }
+        #sidebar h3 { color: #8888cc; margin: 12px 0 6px; font-size: 13px; }
+        #sidebar h3:first-child { margin-top: 0; }
+        .signal-item {
+            padding: 6px 8px; margin: 3px 0; border-radius: 4px;
+            border-left: 3px solid transparent;
+        }
+        .signal-item.buy { border-left-color: #2196F3; background: #0d1b2a; }
+        .signal-item.sell { border-left-color: #e91e63; background: #2a0d1b; }
+        .signal-item .time { color: #666; font-size: 11px; }
+        .signal-item .detail { color: #aaa; font-size: 11px; }
+
+        /* Position cards */
+        .pos-card {
+            padding: 8px; margin: 4px 0; background: #111130;
+            border-radius: 4px; border: 1px solid #1e1e3a;
+        }
+        .pos-card .ticker { font-weight: bold; color: #ffd700; }
+        .pos-card .pnl { font-weight: bold; }
+
+        /* Regime badge */
+        .regime-badge {
+            display: inline-block; padding: 2px 8px; border-radius: 10px;
+            font-size: 11px; font-weight: bold;
+        }
+        .regime-trending { background: #1a3a1a; color: #00ff88; }
+        .regime-ranging  { background: #3a3a1a; color: #ffaa00; }
+        .regime-unknown  { background: #2a2a2a; color: #888; }
+    </style>
+</head>
+<body>
+
+<div id="toolbar">
+    <select id="symbol">
+        <option value="btcusdt" data-pair="BTC/USDT">BTC/USDT</option>
+        <option value="ethusdt" data-pair="ETH/USDT">ETH/USDT</option>
+        <option value="solusdt" data-pair="SOL/USDT">SOL/USDT</option>
+        <option value="paxgusdt" data-pair="PAXG/USDT">PAXG/USDT (Gold)</option>
+    </select>
+    <select id="interval">
+        <option value="1m">1m</option>
+        <option value="5m">5m</option>
+        <option value="15m" selected>15m</option>
+        <option value="1h">1h</option>
+        <option value="4h">4h</option>
+        <option value="1d">1D</option>
+    </select>
+    <button onclick="loadChart()">Load</button>
+    <span id="ws-status" class="status off">Disconnected</span>
+    <span id="price"></span>
+    <span id="pnl"></span>
+</div>
+
+<div id="main">
+    <div id="chart-container"></div>
+    <div id="sidebar">
+        <h3>Regime</h3>
+        <div id="regime-info"><span class="regime-badge regime-unknown">Loading...</span></div>
+
+        <h3>Positions</h3>
+        <div id="positions-list"><em style="color:#555">No positions</em></div>
+
+        <h3>Recent Signals</h3>
+        <div id="signals-list"><em style="color:#555">No signals</em></div>
+
+        <h3>Tracker</h3>
+        <div id="tracker-info" style="color:#555">Loading...</div>
+    </div>
+</div>
+
+<script type="module">
+import { createChart, CandlestickSeries, VolumeSeries, LineSeries }
+    from 'https://unpkg.com/lightweight-charts@5.0.0/dist/lightweight-charts.standalone.production.mjs';
+
+const API_BASE = window.location.origin;
+const container = document.getElementById('chart-container');
+
+// --- Chart ---
+const chart = createChart(container, {
+    layout: { background: { color: '#0a0a1a' }, textColor: '#999' },
+    grid: { vertLines: { color: '#111128' }, horzLines: { color: '#111128' } },
+    crosshair: { mode: 0 },
+    timeScale: { timeVisible: true, secondsVisible: false },
+    rightPriceScale: { borderColor: '#1e1e3a' },
+});
+
+const candleSeries = chart.addSeries(CandlestickSeries, {
+    upColor: '#00c853', downColor: '#ff1744',
+    borderUpColor: '#00c853', borderDownColor: '#ff1744',
+    wickUpColor: '#00c85388', wickDownColor: '#ff174488',
+});
+
+const volumeSeries = chart.addSeries(VolumeSeries, {
+    priceFormat: { type: 'volume' },
+    priceScaleId: 'vol',
+});
+volumeSeries.priceScale().applyOptions({
+    scaleMargins: { top: 0.85, bottom: 0 },
+});
+
+// Resize observer
+const ro = new ResizeObserver(() => chart.applyOptions({ width: container.clientWidth, height: container.clientHeight }));
+ro.observe(container);
+
+let ws = null;
+
+// --- Binance REST: historical klines ---
+async function fetchHistory(symbol, interval, limit = 500) {
+    const url = `https://api.binance.com/api/v3/klines?symbol=${symbol.toUpperCase()}&interval=${interval}&limit=${limit}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    const candles = [], volumes = [];
+    for (const k of data) {
+        const time = k[0] / 1000;
+        candles.push({ time, open: +k[1], high: +k[2], low: +k[3], close: +k[4] });
+        volumes.push({ time, value: +k[5], color: +k[4] >= +k[1] ? '#00c85330' : '#ff174430' });
+    }
+    return { candles, volumes };
+}
+
+// --- Our API: signals for markers ---
+async function fetchSignals(symbol) {
+    try {
+        const resp = await fetch(`${API_BASE}/api/signals?symbol=${symbol}`);
+        if (!resp.ok) return [];
+        return await resp.json();
+    } catch { return []; }
+}
+
+// --- Our API: sidebar data ---
+async function refreshSidebar() {
+    try {
+        // Tracker status
+        const trackerResp = await fetch(`${API_BASE}/tracker/status`);
+        if (trackerResp.ok) {
+            const tracker = await trackerResp.json();
+            const el = document.getElementById('tracker-info');
+            const positions = tracker.positions || {};
+            const count = Object.keys(positions).length;
+            el.innerHTML = `<div>Tracked: ${count} positions</div>
+                <div>Safety: ${tracker.safety_interval || 30}s</div>
+                <div>Agent: ${tracker.agent_interval || 180}s</div>`;
+        }
+    } catch {}
+
+    try {
+        // Recent events -> signals
+        const evResp = await fetch(`${API_BASE}/events/recent?n=50`);
+        if (evResp.ok) {
+            const evData = await evResp.json();
+            const events = evData.events || [];
+            const signalEl = document.getElementById('signals-list');
+            const items = [];
+            for (const ev of events) {
+                const p = ev.payload || ev.data || {};
+                const action = p.action || '';
+                if (action !== 'BUY' && action !== 'SELL') continue;
+                const cls = action === 'BUY' ? 'buy' : 'sell';
+                const ts = ev.timestamp ? new Date(ev.timestamp * 1000).toLocaleTimeString() : '';
+                items.push(`<div class="signal-item ${cls}">
+                    <strong>${action}</strong> ${p.ticker || ''}
+                    <span class="detail">@ ${(p.price||0).toLocaleString()}</span>
+                    <div class="time">${ts} ${(p.reasons||[])[0] || ''}</div>
+                </div>`);
+            }
+            signalEl.innerHTML = items.length ? items.slice(0, 15).join('') : '<em style="color:#555">No signals</em>';
+        }
+    } catch {}
+
+    try {
+        // Broker positions
+        const brResp = await fetch(`${API_BASE}/broker/status`);
+        if (brResp.ok) {
+            const brData = await brResp.json();
+            const posEl = document.getElementById('positions-list');
+            const cards = [];
+            for (const [name, info] of Object.entries(brData)) {
+                if (!info.connected) continue;
+                const positions = info.positions || {};
+                for (const [tic, pos] of Object.entries(positions)) {
+                    const pnl = pos.unrealized_pnl_pct || pos.pnl_pct || 0;
+                    const pnlCls = pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+                    cards.push(`<div class="pos-card">
+                        <span class="ticker">${tic}</span>
+                        <span class="pnl ${pnlCls}">${(pnl*100).toFixed(1)}%</span>
+                        <div class="detail">qty: ${pos.qty || 0} | ${name}</div>
+                    </div>`);
+                }
+            }
+            posEl.innerHTML = cards.length ? cards.join('') : '<em style="color:#555">No positions</em>';
+        }
+    } catch {}
+}
+
+// --- Binance WebSocket: real-time kline ---
+function connectWS(symbol, interval) {
+    if (ws) { ws.close(); ws = null; }
+    const stream = `${symbol.toLowerCase()}@kline_${interval}`;
+    ws = new WebSocket(`wss://stream.binance.com:9443/ws/${stream}`);
+
+    const statusEl = document.getElementById('ws-status');
+    const priceEl = document.getElementById('price');
+
+    ws.onopen = () => { statusEl.textContent = 'Live'; statusEl.className = 'status live'; };
+
+    ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        if (!msg.k) return;
+        const k = msg.k;
+        const time = k.t / 1000;
+        candleSeries.update({ time, open: +k.o, high: +k.h, low: +k.l, close: +k.c });
+        volumeSeries.update({ time, value: +k.v, color: +k.c >= +k.o ? '#00c85330' : '#ff174430' });
+        priceEl.textContent = `$${(+k.c).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    };
+
+    ws.onclose = () => { statusEl.textContent = 'Disconnected'; statusEl.className = 'status off'; };
+    ws.onerror = () => { statusEl.textContent = 'Error'; statusEl.className = 'status off'; };
+}
+
+// --- Apply BUY/SELL markers ---
+function applyMarkers(signals) {
+    const markers = signals.map(s => ({
+        time: s.time,
+        position: s.side === 'BUY' ? 'belowBar' : 'aboveBar',
+        color: s.side === 'BUY' ? '#2196F3' : '#e91e63',
+        shape: s.side === 'BUY' ? 'arrowUp' : 'arrowDown',
+        text: `${s.side}`,
+    }));
+    if (markers.length > 0) {
+        markers.sort((a, b) => a.time - b.time);
+        candleSeries.setMarkers(markers);
+    }
+}
+
+// --- Main ---
+window.loadChart = async function() {
+    const symbolEl = document.getElementById('symbol');
+    const symbol = symbolEl.value;
+    const interval = document.getElementById('interval').value;
+
+    const { candles, volumes } = await fetchHistory(symbol, interval);
+    candleSeries.setData(candles);
+    volumeSeries.setData(volumes);
+
+    // Signals overlay
+    const signals = await fetchSignals(symbol);
+    if (signals.length > 0) applyMarkers(signals);
+
+    connectWS(symbol, interval);
+    chart.timeScale().fitContent();
+
+    // Update price display immediately
+    if (candles.length > 0) {
+        const last = candles[candles.length - 1];
+        document.getElementById('price').textContent =
+            `$${last.close.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+    }
+};
+
+// Auto-load + periodic sidebar refresh
+window.loadChart();
+refreshSidebar();
+setInterval(refreshSidebar, 15000);
+</script>
+</body>
+</html>

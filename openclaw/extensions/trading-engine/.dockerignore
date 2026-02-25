@@ -1,0 +1,17 @@
+node_modules/
+.git/
+*.pyc
+__pycache__/
+python/venv/
+python/data/raw/
+python/data/processed/
+python/logs/*.log
+python/models/*.pkl
+python/models/ppo/
+python/models/a2c/
+python/models/sac/
+research/
+docs/
+tests/
+*.md
+.env

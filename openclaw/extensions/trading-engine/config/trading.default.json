@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "_comment": "Trading Engine default configuration. Copy to trading.json and customize.",
+
+  "watchlist": {
+    "tickers": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM", "V", "JNJ"],
+    "description": "Default watchlist - S&P 500 top 10 by market cap"
+  },
+
+  "training": {
+    "lookback_days": 365,
+    "train_split": 0.8,
+    "total_timesteps": 50000,
+    "learning_rate": 0.0003,
+    "batch_size": 256,
+    "n_epochs": 10,
+    "gamma": 0.99,
+    "gae_lambda": 0.95
+  },
+
+  "ensemble": {
+    "models": ["ppo", "a2c", "ddpg"],
+    "sharpe_window": 63,
+    "min_weight": 0.1,
+    "rebalance_freq": 5,
+    "validation_threshold": 0.95
+  },
+
+  "indicators": {
+    "ema_periods": [12, 26],
+    "rsi_period": 14,
+    "bb_period": 20,
+    "bb_std": 2,
+    "atr_period": 14,
+    "volume_sma_period": 20
+  },
+
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8787,
+    "workers": 1,
+    "log_level": "info"
+  },
+
+  "brokers": {
+    "alpaca": {
+      "enabled": true,
+      "mode": "paper",
+      "market_type": "equity",
+      "base_url": "https://paper-api.alpaca.markets",
+      "_live_url": "https://api.alpaca.markets"
+    },
+    "binance": {
+      "enabled": false,
+      "mode": "paper",
+      "market_type": "crypto",
+      "market": "spot",
+      "pairs": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"],
+      "fees": {
+        "spot_taker": 0.001,
+        "spot_maker": 0.001,
+        "futures_taker": 0.0005,
+        "futures_maker": 0.0002
+      }
+    },
+    "kis": {
+      "enabled": false,
+      "mode": "mock",
+      "market_type": "equity",
+      "exchange": "NASD"
+    }
+  },
+
+  "data_sources": {
+    "primary": "yfinance",
+    "news": "financial-datasets-mcp",
+    "realtime": "alpha-vantage-mcp"
+  }
+}

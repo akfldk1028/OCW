@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "_comment": "Risk management configuration. Copy to risk.json and customize.",
+
+  "position_management": {
+    "take_profit_pct": 0.01,
+    "stop_loss_pct": -0.005,
+    "trailing_stop": false,
+    "trailing_stop_pct": -0.003,
+    "_comment": "take_profit: +1%, stop_loss: -0.5%, trailing: disabled by default"
+  },
+
+  "position_sizing": {
+    "method": "kelly",
+    "kelly_fraction": 0.25,
+    "max_position_pct": 0.15,
+    "min_position_usd": 100,
+    "_comment": "Quarter-Kelly for safety. Max 15% of portfolio per position."
+  },
+
+  "portfolio_limits": {
+    "max_exposure_pct": 0.80,
+    "max_positions": 10,
+    "max_sector_pct": 0.30,
+    "_comment": "Max 80% invested, max 10 positions, max 30% per sector"
+  },
+
+  "daily_limits": {
+    "max_trades": 20,
+    "max_daily_loss_pct": -0.02,
+    "halt_on_loss_limit": true,
+    "resume_next_day": true,
+    "_comment": "Max 20 trades/day. Halt trading if daily loss exceeds -2%."
+  },
+
+  "circuit_breakers": {
+    "max_drawdown_pct": -0.10,
+    "max_consecutive_losses": 5,
+    "volatility_halt_vix": 35,
+    "_comment": "Emergency stop: -10% drawdown, 5 consecutive losses, or VIX>35"
+  },
+
+  "alerts": {
+    "on_trade_execute": true,
+    "on_stop_loss": true,
+    "on_take_profit": true,
+    "on_daily_limit": true,
+    "on_circuit_breaker": true,
+    "channels": ["last"]
+  }
+}

@@ -1,0 +1,38 @@
+======================================================================
+  REGIME BLEND SWING BACKTEST (4h bars)
+  Period: 2025-03-01 ~ 2026-02-01
+  Initial: $5,000, Tickers: ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
+======================================================================
+  Downloading BTCUSDT 4h...
+    2382 bars
+  Downloading ETHUSDT 4h...
+    2382 bars
+  Downloading SOLUSDT 4h...
+    2382 bars
+
+  Running: 4h rebal (swing params)...
+
+  Running: 8h rebal (swing params)...
+
+  Running: 12h rebal (swing params)...
+
+  Running: 24h rebal (swing params)...
+
+  Running: 3-day rebal (swing params)...
+
+  Running: 24h rebal (original params)...
+
+======================================================================
+  RESULTS COMPARISON
+======================================================================
+  Strategy                    Return  Sharpe      MDD  Trades   WinR    AvgW    AvgL
+--------------------------------------------------------------------------------
+  Buy & Hold                  -6.0%                         
+  4h rebal [swing]            -2.8%   -0.03  -25.9%     233   51%  +3.2%  -3.1%
+  8h rebal [swing]           +12.7%    0.72  -19.1%     170   51%  +4.3%  -3.3%
+  12h rebal [swing]           -0.4%    0.08  -24.0%     151   50%  +4.2%  -3.9%
+  24h rebal [swing]           +3.1%    0.27  -19.8%      94   44%  +6.8%  -4.5%
+  3-day rebal [swing]         -0.8%    0.05  -23.9%      47   40% +10.2%  -6.6%
+  24h rebal [original]        -1.7%    0.04  -23.9%      87   40%  +7.3%  -4.6%
+
+======================================================================

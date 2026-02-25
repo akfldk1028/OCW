@@ -1,0 +1,15 @@
+.env
+.env.*
+*.pyc
+__pycache__/
+.pytest_cache/
+venv/
+.venv/
+binance/logs/
+binance/data/
+binance/models/
+*.log
+.git/
+.idea/
+.claude/
+node_modules/

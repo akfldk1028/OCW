@@ -1,0 +1,27 @@
+============================================================
+  CLAUDE AGENT SIMULATION BACKTEST
+============================================================
+  Period: 2025-03-01 ~ (days=1)
+  Initial: $5,000 -> Final: $5,000
+
+  --- Performance ---
+  Return:     +0.0%
+  Sharpe:     0.00
+  MDD:        0.0%
+  Alpha(BTC): +4.7% (BTC B&H: -4.7%)
+
+  --- Trades ---
+  Total:      0
+  Win rate:   0% (0 sells)
+  Avg Win:    +0.0%
+  Avg Loss:   +0.0%
+  Risk exits: 0 (0%)
+
+  --- Claude ---
+  Calls:      2
+  Failures:   2
+============================================================
+
+TRADE LOG:
+
+CLAUDE DECISIONS (sample):

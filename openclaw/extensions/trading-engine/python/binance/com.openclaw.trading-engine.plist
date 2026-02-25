@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.openclaw.trading-engine</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>cd ~/openclaw/extensions/trading-engine/python &amp;&amp; source .venv/bin/activate &amp;&amp; python3 binance/main.py --testnet</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>~/openclaw/extensions/trading-engine/python</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>~/openclaw/extensions/trading-engine/python/data/logs/engine.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>~/openclaw/extensions/trading-engine/python/data/logs/engine.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>
+<!--
+Setup:
+  1. Copy to ~/Library/LaunchAgents/
+     cp binance/com.openclaw.trading-engine.plist ~/Library/LaunchAgents/
+
+  2. Edit ProgramArguments to match your setup:
+     - Change python3 path if using pyenv/conda
+     - Add --futures --leverage 3 for futures mode
+     - Remove --testnet for live trading (requires LIVE_TRADING=true in .env)
+
+  3. Load:
+     launchctl load ~/Library/LaunchAgents/com.openclaw.trading-engine.plist
+
+  4. Check status:
+     launchctl list | grep openclaw
+
+  5. Stop:
+     launchctl unload ~/Library/LaunchAgents/com.openclaw.trading-engine.plist
+
+  6. View logs:
+     tail -f ~/openclaw/extensions/trading-engine/python/data/logs/engine.stderr.log
+-->

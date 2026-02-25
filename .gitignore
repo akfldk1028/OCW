@@ -1,0 +1,64 @@
+# ── IDE ──
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Python ──
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+venv/
+.venv/
+*.egg
+
+# ── Node ──
+node_modules/
+dist/
+.tsbuildinfo
+bun.lock
+bun.lockb
+pnpm-lock.yaml
+
+# ── Secrets ──
+.env
+.env.local
+.env.production
+!.env.example
+*.key
+*.pem
+credentials.json
+
+# ── Runtime data / logs ──
+logs/
+*.log
+
+# ── ML models & data ──
+*.pkl
+*.h5
+*.onnx
+models/
+
+# ── Large data files ──
+*.csv
+*.pdf
+data/
+
+# ── Build / cache ──
+.pytest_cache/
+.mypy_cache/
+htmlcov/
+coverage/
+*.bun-build
+
+# ── Trading engine specifics ──
+openclaw/extensions/trading-engine/python/binance/logs/
+openclaw/extensions/trading-engine/python/binance/data/
+openclaw/extensions/trading-engine/python/binance/models/

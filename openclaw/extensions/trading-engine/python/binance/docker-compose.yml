@@ -1,0 +1,12 @@
+services:
+  trading-bot:
+    build:
+      context: ..
+      dockerfile: binance/Dockerfile
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/binance/data
+      - ./logs:/app/binance/logs
+      - ./models:/app/binance/models
+    restart: unless-stopped

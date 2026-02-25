@@ -1,0 +1,116 @@
+======================================================================
+  LGBM SHORT-TIMEFRAME BACKTEST
+  Period: 2025-03-01 ~ 2026-02-01
+  Interval: 15m, Horizon: 16 bars (4h)
+  Initial: $5,000
+  Tickers: ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
+======================================================================
+
+Downloading BTCUSDT 15m data...
+  Got 41953 bars (2024-11-20 15:00:00 ~ 2026-01-31 15:00:00)
+
+Downloading ETHUSDT 15m data...
+  Got 41953 bars (2024-11-20 15:00:00 ~ 2026-01-31 15:00:00)
+
+Downloading SOLUSDT 15m data...
+  Got 41953 bars (2024-11-20 15:00:00 ~ 2026-01-31 15:00:00)
+
+Backtest bars: 32317 (2025-03-01 00:00:00 ~ 2026-01-31 15:00:00)
+  [2025-03-01] BTC/USDT retrain: AUC=0.575 acc=0.542 n=6729
+  [2025-03-01] ETH/USDT retrain: AUC=0.534 acc=0.528 n=6730
+  [2025-03-01] SOL/USDT retrain: AUC=0.583 acc=0.566 n=6724
+  [2025-03-31] BTC/USDT retrain: AUC=0.476 acc=0.493 n=6736
+  [2025-03-31] ETH/USDT retrain: AUC=0.494 acc=0.532 n=6728
+  [2025-03-31] SOL/USDT retrain: AUC=0.510 acc=0.520 n=6722
+  [2025-04-30] BTC/USDT retrain: AUC=0.478 acc=0.502 n=6736
+  [2025-04-30] ETH/USDT retrain: AUC=0.517 acc=0.514 n=6733
+  [2025-04-30] SOL/USDT retrain: AUC=0.546 acc=0.475 n=6725
+  [2025-05-30] BTC/USDT retrain: AUC=0.559 acc=0.532 n=6740
+  [2025-05-30] ETH/USDT retrain: AUC=0.516 acc=0.500 n=6730
+  [2025-05-30] SOL/USDT retrain: AUC=0.564 acc=0.556 n=6725
+  [2025-06-29] BTC/USDT retrain: AUC=0.538 acc=0.533 n=6743
+  [2025-06-29] ETH/USDT retrain: AUC=0.621 acc=0.608 n=6734
+  [2025-06-29] SOL/USDT retrain: AUC=0.485 acc=0.474 n=6720
+  [2025-07-29] BTC/USDT retrain: AUC=0.562 acc=0.545 n=6737
+  [2025-07-29] ETH/USDT retrain: AUC=0.554 acc=0.565 n=6734
+  [2025-07-29] SOL/USDT retrain: AUC=0.507 acc=0.502 n=6725
+  [2025-08-28] BTC/USDT retrain: AUC=0.591 acc=0.561 n=6733
+  [2025-08-28] ETH/USDT retrain: AUC=0.549 acc=0.533 n=6730
+  [2025-08-28] SOL/USDT retrain: AUC=0.526 acc=0.544 n=6712
+  [2025-09-27] BTC/USDT retrain: AUC=0.551 acc=0.520 n=6731
+  [2025-09-27] ETH/USDT retrain: AUC=0.542 acc=0.505 n=6730
+  [2025-09-27] SOL/USDT retrain: AUC=0.501 acc=0.456 n=6715
+  [2025-10-27] BTC/USDT retrain: AUC=0.513 acc=0.517 n=6732
+  [2025-10-27] ETH/USDT retrain: AUC=0.552 acc=0.541 n=6732
+  [2025-10-27] SOL/USDT retrain: AUC=0.551 acc=0.544 n=6721
+  [2025-11-26] BTC/USDT retrain: AUC=0.574 acc=0.522 n=6732
+  [2025-11-26] ETH/USDT retrain: AUC=0.561 acc=0.545 n=6736
+  [2025-11-26] SOL/USDT retrain: AUC=0.591 acc=0.492 n=6732
+  [2025-12-26] BTC/USDT retrain: AUC=0.537 acc=0.552 n=6732
+  [2025-12-26] ETH/USDT retrain: AUC=0.573 acc=0.550 n=6733
+  [2025-12-26] SOL/USDT retrain: AUC=0.552 acc=0.548 n=6728
+  [2026-01-25] BTC/USDT retrain: AUC=0.518 acc=0.509 n=6731
+  [2026-01-25] ETH/USDT retrain: AUC=0.551 acc=0.516 n=6736
+  [2026-01-25] SOL/USDT retrain: AUC=0.560 acc=0.549 n=6728
+
+======================================================================
+  PERFORMANCE COMPARISON
+======================================================================
+
+  --- lgbm_only ---
+  Final Value:   $4,654
+  Total Return:  -6.9%
+  Sharpe:        -0.30
+  Max Drawdown:  -22.5%
+  Trades:        351 (174 round-trips)
+  Win Rate:      57% (100W / 74L)
+  Avg Win:       +2.8%
+  Avg Loss:      -3.9%
+  Risk Exits:    22
+
+  --- blend_only ---
+  Final Value:   $5,625
+  Total Return:  +12.5%
+  Sharpe:        0.75
+  Max Drawdown:  -10.1%
+  Trades:        100 (50 round-trips)
+  Win Rate:      52% (26W / 24L)
+  Avg Win:       +8.6%
+  Avg Loss:      -5.4%
+  Risk Exits:    24
+
+  --- ensemble ---
+  Final Value:   $5,012
+  Total Return:  +0.2%
+  Sharpe:        0.09
+  Max Drawdown:  -11.8%
+  Trades:        50 (25 round-trips)
+  Win Rate:      44% (11W / 14L)
+  Avg Win:       +7.6%
+  Avg Loss:      -6.2%
+  Risk Exits:    19
+
+  --- Buy & Hold ---
+  Final Value:   $5,002
+  Total Return:  +0.0%
+  Sharpe:        0.31
+  Max Drawdown:  -41.6%
+
+  --- Feature Importance (BTC/USDT) ---
+  volatility_64             44
+  volatility_192            43
+  macd_signal               34
+  ret_64                    31
+  vol_std                   21
+  bb_width_20               19
+  atr_14                    18
+  adx_14                    13
+  macd                      12
+  volatility_16             11
+
+  --- Alpha vs Buy & Hold (+0.0%) ---
+  lgbm_only       Alpha: -7.0%
+  blend_only      Alpha: +12.4%
+  ensemble        Alpha: +0.2%
+
+======================================================================

@@ -1,0 +1,19 @@
+{
+  "name": "@openclaw/trading-engine",
+  "version": "2026.2.14",
+  "private": true,
+  "description": "Real-time multi-agent trading engine with WebSocket streaming, XGBoost cross-sectional ranking, and ensemble risk management",
+  "type": "module",
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.0",
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

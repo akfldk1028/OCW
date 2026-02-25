@@ -1,0 +1,512 @@
+{
+  "metrics": {
+    "total_return": -0.004914153757716089,
+    "sharpe": -0.915924970039594,
+    "mdd": -0.009179086489741894,
+    "alpha_vs_btc": 0.04229843667266053,
+    "btc_bh_return": -0.04721259043037662,
+    "total_trades": 9,
+    "sell_trades": 3,
+    "win_rate": 0.0,
+    "avg_win": 0,
+    "avg_loss": -0.026898322844905176,
+    "risk_exits": 0,
+    "risk_exit_pct": 0.0,
+    "claude_calls": 14,
+    "claude_failures": 0,
+    "final_pv": 4975.429231211419,
+    "initial_cash": 5000.0,
+    "days": 14
+  },
+  "trades": [
+    {
+      "time": "2025-03-13 00:00:00",
+      "ticker": "BTC/USDT",
+      "side": "BUY",
+      "price": 83577.14,
+      "pnl_pct": 0,
+      "reason": "Fresh portfolio, ranging market with neutral signals. BTC is the most stable candidate: 4h decline i",
+      "confidence": 0.42
+    },
+    {
+      "time": "2025-03-14 00:00:00",
+      "ticker": "BTC/USDT",
+      "side": "SELL",
+      "price": 81888.77,
+      "pnl_pct": -0.020201337351337882,
+      "reason": "My previous session note flagged $82K as key support — BTC is now trading at $81,889, a confirmed br",
+      "confidence": 0.72
+    },
+    {
+      "time": "2025-03-15 00:00:00",
+      "ticker": "BTC/USDT",
+      "side": "BUY",
+      "price": 84491.99,
+      "pnl_pct": 0,
+      "reason": "BTC at $84,491 has decisively reclaimed my previously-stated resistance zone of $82K-$83K — the prim",
+      "confidence": 0.4
+    },
+    {
+      "time": "2025-03-18 00:00:00",
+      "ticker": "BTC/USDT",
+      "side": "SELL",
+      "price": 83147.6,
+      "pnl_pct": -0.015911449120798307,
+      "reason": "Closing long. Entry $84,491.99, current $83,147.60 = -1.59% position loss (~$8 realized). Most criti",
+      "confidence": 0.8
+    },
+    {
+      "time": "2025-03-20 00:00:00",
+      "ticker": "SOL/USDT",
+      "side": "BUY",
+      "price": 133.91,
+      "pnl_pct": 0,
+      "reason": "SOL is the 24h momentum leader (+5.88%) and was my explicit top re-entry candidate from last cycle. ",
+      "confidence": 0.53
+    },
+    {
+      "time": "2025-03-21 00:00:00",
+      "ticker": "SOL/USDT",
+      "side": "SELL",
+      "price": 127.94,
+      "pnl_pct": -0.044582182062579336,
+      "reason": "Mental stop at ~$128 has been definitively triggered. SOL is at $127.94, breaching the -4.46% stop l",
+      "confidence": 0.8
+    },
+    {
+      "time": "2025-03-21 00:00:00",
+      "ticker": "BTC/USDT",
+      "side": "BUY",
+      "price": 84451.96,
+      "pnl_pct": 0,
+      "reason": "BTC at $84,451 sits squarely within my pre-defined accumulation range of $84K–$84.5K. The 4h candle ",
+      "confidence": 0.58
+    },
+    {
+      "time": "2025-03-23 00:00:00",
+      "ticker": "ETH/USDT",
+      "side": "BUY",
+      "price": 2008.31,
+      "pnl_pct": 0,
+      "reason": "My pre-planned trigger has fired: ETH broke above $2,000 (now $2,008.31) with a positive 4h (+1.39%)",
+      "confidence": 0.6
+    },
+    {
+      "time": "2025-03-24 00:00:00",
+      "ticker": "SOL/USDT",
+      "side": "BUY",
+      "price": 138.16,
+      "pnl_pct": 0,
+      "reason": "SOL is the clear leader: +4.00% in 4h and +5.59% in 24h. My previous note specified 'NO entry yet, n",
+      "confidence": 0.7
+    }
+  ],
+  "decisions": [
+    {
+      "time": "2025-03-13 00:00:00",
+      "assessment": "Market is in a low-conviction range with neutral funding, missing derivatives data, and mild short-term 4h weakness across all three assets — preserve capital and deploy cautiously.",
+      "decisions": [
+        {
+          "ticker": "BTC/USDT:USDT",
+          "action": "BUY",
+          "position_pct": 0.1,
+          "confidence": 0.42,
+          "reasoning": "Fresh portfolio, ranging market with neutral signals. BTC is the most stable candidate: 4h decline is minimal (-0.12%, essentially flat), 24h positive (+1.76%), and funding at exactly 0.0000 means no leveraged crowding in either direction. Taking a small 10% starter position to initiate market exposure while preserving 90% dry powder. In a ranging regime, this acts as a mean-reversion probe if we're near range lows. Low confidence due to zero RL history and missing CVD/L/S data — sizing reflects that uncertainty."
+        },
+        {
+          "ticker": "ETH/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.6,
+          "reasoning": "ETH is underperforming BTC on the 4h timeframe (-1.12% vs -0.12%), suggesting relative weakness. Without CVD or L/S data to confirm if this is capitulation or continuation, I prefer to watch. If ETH stabilizes and shows relative strength recovery vs BTC, that would be a cleaner entry signal. No position for now."
+        },
+        {
+          "ticker": "SOL/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.65,
+          "reasoning": "SOL has the strongest 24h return (+1.99%) but weakest 4h print (-1.30%), suggesting it ran up and is now pulling back. In a ranging regime, chasing the recent 24h winner into a 4h selloff is risky. High volume ($426K) could mean distribution. Will wait for 4h stabilization before considering entry. No position."
+        }
+      ],
+      "next_check": 3600,
+      "memory": "Session start 2026-02-24. Deployed 10% into BTC @ ~$83,577 as conservative starter. Ranging market, zero funding rates, no CVD/LS data. ETH weak on 4h, SOL volatile. Key levels: BTC support ~$82K, resistance ~$85.5K. Holding 90% cash. Next: look for ETH relative strength recovery or BTC range breakout before adding."
+    },
+    {
+      "time": "2025-03-14 00:00:00",
+      "assessment": "BTC has broken below its $82K support in a trending regime with no perp-market cushion (flat funding, no CVD data), suggesting the path of least resistance is lower until proven otherwise; ETH's relative strength is the only constructive signal but insufficient to trade against BTC weakness.",
+      "decisions": [
+        {
+          "ticker": "BTC/USDT:USDT",
+          "action": "SELL",
+          "position_pct": 0.0,
+          "confidence": 0.72,
+          "reasoning": "My previous session note flagged $82K as key support — BTC is now trading at $81,889, a confirmed break below that level. Entry was $83,577, current PnL -2.02%. In a trending regime, support breaks tend to accelerate, not reverse quickly. The 4h bounce (+0.95%) is a mild relief rally but doesn't override the daily downtrend (-2.02%). Funding is flat (0.0000) — no perp-market forced squeeze to drive recovery. CVD and L/S data are unavailable, removing two key confirmation tools. With zero RL trade history, I have no regime-specific signal reliability to lean on. Cutting the loss now at ~$10 preserves capital for a higher-conviction re-entry. Holding through a support breakdown with limited data is speculation, not edge."
+        },
+        {
+          "ticker": "ETH/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.6,
+          "reasoning": "ETH is the most interesting asset in this snapshot: 24h +0.13% vs BTC -2.02% is a significant 2.15pp relative outperformance, and the 4h +1.32% on elevated volume ($37,434 ETH vs BTC's $2,747) hints at genuine demand. However, altcoins historically bleed when BTC continues lower. I will NOT buy here — I need BTC to find and hold a floor first. ETH is top of watchlist for next entry once BTC stabilizes. If BTC reclaims $82K and ETH maintains relative strength, a 7-10% ETH allocation becomes compelling."
+        },
+        {
+          "ticker": "SOL/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.65,
+          "reasoning": "SOL 24h -0.39%, modestly weak. Highest volume by coin count ($338,983 SOL) but without CVD context that volume is uninterpretable. No relative strength signal vs BTC. Skip — lowest priority among the three until macro picture clarifies."
+        }
+      ],
+      "next_check": 1800,
+      "memory": "2026-02-24: SOLD BTC at ~$81,889 (-2.02%, ~-$10). $82K support broken. Now ~100% cash ($4,989). ETH top watchlist — 24h relative strength +2.15pp vs BTC. Key levels: BTC support $80K (major), resistance $82K-$83K. ETH resistance $1,950. Re-entry thesis: BTC must reclaim $82K + need at least one derivative confirmation (CVD or L/S). Lesson learned: don't enter with only price signals in data-sparse environment."
+    },
+    {
+      "time": "2025-03-15 00:00:00",
+      "assessment": "BTC has reclaimed prior resistance convincingly ($82K→$84.5K) but the regime classifier still reads 'ranging', derivatives are dark across all tickers, and SOL's 8.47% surge looks over-extended — re-entering BTC at minimal size (10%) while preserving 90% cash for better-confirmed setups.",
+      "decisions": [
+        {
+          "ticker": "BTC/USDT:USDT",
+          "action": "BUY",
+          "position_pct": 0.1,
+          "confidence": 0.4,
+          "reasoning": "BTC at $84,491 has decisively reclaimed my previously-stated resistance zone of $82K-$83K — the primary re-entry condition from my last note is met. The 24h move of +3.18% is real and sustained, and funding sits at 0.0000 (no long crowding or overheating signal). However, confidence is deliberately low (0.40) for three reasons: (1) derivatives remain dark — CVD and L/S z-score still N/A, so I have no second confirmation; (2) regime is classified as 'ranging', meaning $84.5K could be the range top rather than a continuation; (3) I'm entering 3.2% above my prior sell, which means the risk/reward is less favorable than it was at $82K. Taking only 10% to honor my own lesson about data-sparse environments while not sitting 100% cash as the market runs away. Hard stop: close below $83,000 (back below reclaimed resistance invalidates the thesis)."
+        },
+        {
+          "ticker": "ETH/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.6,
+          "reasoning": "ETH is underperforming BTC on the 24h frame (+1.65% vs +3.18%), a reversal from last session when ETH showed relative strength. Resistance at $1,950 has not been tested. No derivative confirmation available. With regime 'ranging', ETH is in no-man's land — not showing compelling strength to buy, not showing weakness to short. Wait for either a pullback toward $1,850 support or a breakout above $1,950 with volume."
+        },
+        {
+          "ticker": "SOL/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.65,
+          "reasoning": "SOL +8.47% in 24h with high volume (333K) is the session's standout mover. However, entering after an 8%+ single-day move in a 'ranging' regime is textbook top-chasing. Ranging regimes punish momentum entries — they revert. The high volume could indicate a blowoff rather than sustained accumulation. Will watch for a pullback into the $125-$128 zone for a higher-conviction entry. If SOL consolidates above $130 for several candles and regime upgrades to 'trending', I'll revisit."
+        }
+      ],
+      "next_check": 3600,
+      "memory": "2026-02-24: Missed BTC rally $81.9K→$84.5K from premature sell. Re-entered tiny BTC at ~$84.5K (10% = ~$499). Stop: $83K. SOL +8.47% — too extended to chase in ranging regime, watch for $125-128 pullback entry. ETH underperforming. ALL derivatives still N/A (funding=0 only reliable signal). Key levels: BTC support $83K (reclaimed resistance), $80K (major). BTC range top estimate $86-87K. Lesson: in ranging regime, support breaks are fakeouts — weight regime over price-signal direction."
+    },
+    {
+      "time": "2025-03-16 00:00:00",
+      "assessment": "Market is in deep consolidation — BTC essentially unchanged over 24h, all funding rates at zero, derivatives data absent, and volume subdued; patience and capital preservation are the only edge in this environment.",
+      "decisions": [
+        {
+          "ticker": "BTC/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.1,
+          "confidence": 0.62,
+          "reasoning": "Current position entered at $84,491.99, now at $84,332 (-0.19% PnL, -$0.94 unrealized). Stop at $83K is well below current price — no reason to exit. Price action is extremely flat (4h: -0.01%, 24h: -0.19%) with near-zero volume signal. Funding=0.0000, CVD=N/A, L/S=N/A — full data blackout on derivatives. Ranging regime confirmed: be patient, hold the range-midpoint position and let price come to either the stop ($83K) or range top ($86-87K). No signal strong enough to add or reduce. Previous note lesson: don't act on noise in ranging conditions."
+        },
+        {
+          "ticker": "ETH/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.55,
+          "reasoning": "No position. ETH has been underperforming BTC consistently — this remains the case (4h: -0.50% vs BTC 4h: -0.01%). No clear setup in a ranging/unknown macro regime. Funding neutral. Without derivatives data to confirm directional bias and with ETH showing relative weakness, initiating here offers poor risk/reward. Staying sidelined until either a clear pullback to strong support or a regime shift."
+        },
+        {
+          "ticker": "SOL/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.58,
+          "reasoning": "No position. SOL at $135.50 — still well above my target entry zone of $125-128 that was set after the $128→$135+ extension. 4h: -0.26% suggests minor softening, but we need a more substantial pullback to get to defined support. 24h vol of $240K shows it remains the most actively traded of the three but no directional edge in ranging conditions. Chasing here at $135 after an 8%+ move in a ranging regime is not disciplined. Wait."
+        }
+      ],
+      "next_check": 3600,
+      "memory": "2026-02-24: BTC position held at entry $84,491.99 (qty=0.0059, ~10% portfolio). Stop: $83K. Range: $83K support → $86-87K resistance. Price at $84,332 — midrange, no action needed. SOL target entry still $125-128 (currently $135.50 — not yet). ETH underperforming, no position. All derivatives N/A, funding=0 across board. Ranging regime — DO NOT chase, DO NOT overtrade. Next catalyst: watch for vol expansion or regime shift signal."
+    },
+    {
+      "time": "2025-03-17 00:00:00",
+      "assessment": "BTC teetering near $83K stop with a weak 4h bounce; SOL approaching target entry zone but 24h weakness demands patience; ETH continues to underperform — ranging regime intact, no rush.",
+      "decisions": [
+        {
+          "ticker": "BTC/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.65,
+          "reasoning": "BTC at $83,675 — position held at $84,492 entry, PnL -0.97%. Price is still above my $83K hard stop but only by ~$675 (~0.8%) — uncomfortably close. The 4h bounce of +1.33% is mildly encouraging, suggesting buyers are defending this zone. However, we're still in a ranging regime, 24h is negative, and all derivatives remain N/A with funding flat at 0. No justification to add here — poor R/R to buy below entry in a range. Holding and watching stop."
+        },
+        {
+          "ticker": "ETH/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.72,
+          "reasoning": "ETH at $1,908.85, 24h -0.97%, continuing to underperform BTC. No position. Funding flat, CVD/L/S N/A. In a ranging regime with no edge from derivatives data, ETH offers no compelling setup. Relative weakness vs BTC is a consistent signal to avoid. No change."
+        },
+        {
+          "ticker": "SOL/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.58,
+          "reasoning": "SOL at $128.96 — tantalizingly close to my target entry zone of $125-128, but sitting just above the upper bound at $129. More importantly, the 24h decline of -4.83% is significant and unresolved. The 4h bounce of +2.24% could easily be a relief bounce within a continuation lower. No derivatives confirmation (CVD N/A, funding=0). Ranging regime means patience is the edge — waiting for $125-127 for a defined R/R entry with stop at $122. Do not chase the bounce."
+        }
+      ],
+      "next_check": 1800,
+      "memory": "BTC $83,676 (entry $84,492, -0.97%). STOP: $83,000 — only $675 away, HIGH ALERT. Range: $83K support → $86-87K resistance. SOL $128.96 — target entry $125-127 (24h -4.83%, wait for lower). ETH underperforming, no position. Funding=0 everywhere, all derivatives N/A. Ranging regime — protect capital, do not add, do not overtrade. Next: SOL entry or BTC stop management."
+    },
+    {
+      "time": "2025-03-18 00:00:00",
+      "assessment": "Broad crypto sell-off continues in a ranging regime — BTC has breached my stop threshold at $83,147 with no derivative support, SOL deeply negative, ETH underperforming; capital preservation is the only correct posture.",
+      "decisions": [
+        {
+          "ticker": "BTC/USDT:USDT",
+          "action": "SELL",
+          "position_pct": 0.0,
+          "confidence": 0.8,
+          "reasoning": "Closing long. Entry $84,491.99, current $83,147.60 = -1.59% position loss (~$8 realized). Most critically: my predefined stop was $83,000 and we are NOW ONLY $147 AWAY — effectively at the stop. Since my last note, BTC fell another ~$529 ($83,676 → $83,147) with no sign of stabilization. 4h candle -1.03%, 24h -0.63%, momentum clearly down. All derivatives remain N/A — zero confirmation of any reversal. Funding flat at 0. Ranging regime provides no upside catalyst. Risk/reward is extremely poor: $147 of cushion to stop vs $2,800+ to meaningful resistance at $86-87K. Executing the stop plan proactively rather than waiting for a wick through $83,000 to force a worse fill. Capital preservation in ranging regimes is the priority."
+        },
+        {
+          "ticker": "ETH/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.75,
+          "reasoning": "No position held. ETH continues to underperform across all timeframes (4h -1.31%, 24h -0.40%). Derivatives all N/A. No entry signal. Waiting for market stabilization before considering any exposure."
+        },
+        {
+          "ticker": "SOL/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.72,
+          "reasoning": "SOL has reached $124.15 — now BELOW my target entry zone of $125-127 — but I will NOT buy here. The broader market is still actively declining (BTC selling off, risk-off across the board). SOL's own momentum is deeply negative (4h -3.02%, 24h -3.73%), and catching a falling knife with zero derivative confirmation is a low-probability setup. A real entry requires: (1) BTC finding and holding $83K, (2) SOL consolidating with a narrowing range, (3) some positive derivative signal. None of these conditions are met. Wait for a base to form."
+        }
+      ],
+      "next_check": 900,
+      "memory": "SOLD BTC ~$83,147 (entry $84,492, -1.59%, ~$8 loss). Stop $83K almost hit — executed proactively. Now 100% cash ~$4,980. SOL $124 (BELOW $125-127 target but market too weak to buy — wait). Key levels: BTC $83K = major support (break = cascade), $84.2-84.5K = re-entry zone, $86-87K = resistance. SOL: need BTC stabilization first, then SOL basing pattern. All derivatives N/A, funding=0 everywhere. Ranging regime. NO new entries until BTC shows clear support or reversal signal."
+    },
+    {
+      "time": "2025-03-19 00:00:00",
+      "assessment": "BTC is teetering on the $83K make-or-break support with only a marginal 4h bounce; ETH and SOL show relative strength but the ranging regime, two recent losses, and absence of derivatives confirmation demand strict patience before any re-entry.",
+      "decisions": [
+        {
+          "ticker": "BTC/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.75,
+          "reasoning": "BTC at $83,037 is sitting exactly on the $83K major support flagged in my previous note. The 4h bounce of +0.39% is real but far too small to confirm a genuine reversal — a single weak green candle at a critical support level is not the 'clear signal' I committed to waiting for. The 24h return is still -0.13%, confirming the overall drift is still negative. Two recent losses (-2.02%, -1.59%) came from entering on similar marginal bounces in a ranging environment. Staying 100% cash preserves full optionality: if $83K breaks, I avoid the cascade; if it holds and rallies to $84.2K+, I can buy the confirmed move with conviction."
+        },
+        {
+          "ticker": "ETH/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.65,
+          "reasoning": "ETH is the relative strength leader at +1.95% 24h and +0.35% 4h, which is notable. However, all derivatives (CVD, L/S ratio, funding) are unavailable or zero — I'm navigating without crucial confirmation signals. In a ranging regime with no TS posterior data and BTC teetering at support, opening a new ETH position introduces unquantified risk. Will revisit if BTC confirms its $83K floor across multiple candles."
+        },
+        {
+          "ticker": "SOL/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.65,
+          "reasoning": "SOL at $126.47 has entered my pre-identified $125-127 target zone with decent 4h momentum (+0.91%) and 24h strength (+1.87%). This is the most tempting setup. However, my explicit rule from last session was: BTC stabilization first, then SOL entry. BTC is still teetering at $83K with only a marginal bounce — not a stabilized base. SOL moves up as the highest-priority re-entry candidate the moment BTC confirms support over the next 1-2 candles."
+        }
+      ],
+      "next_check": 3600,
+      "memory": "HOLDING 100% cash ~$4,980. BTC $83,037 = AT $83K support, only +0.39% 4h bounce — NOT convincing. SOL $126.47 = IN $125-127 target zone, best re-entry candidate. ETH relative strength leader (+1.95% 24h). RE-ENTRY RULES: Need BTC 4h close above $84K OR SOL basing pattern post-BTC confirmation. AVOID: buying marginal green candles at support (caused both losses). Wake: BTC <$82.5K (breakdown/avoid) or >$84.2K (BUY signal)."
+    },
+    {
+      "time": "2025-03-20 00:00:00",
+      "assessment": "The 24h crypto rally is real and BTC has cleared key resistance, but all 4h candles have flipped negative suggesting a short-term consolidation or pullback within a ranging regime — initiating a small SOL position while holding 90% cash to reload on a deeper dip or confirmed breakout.",
+      "decisions": [
+        {
+          "ticker": "SOL/USDT:USDT",
+          "action": "BUY",
+          "position_pct": 0.1,
+          "confidence": 0.53,
+          "reasoning": "SOL is the 24h momentum leader (+5.88%) and was my explicit top re-entry candidate from last cycle. BTC has confirmed a clean break above my $84,200 trigger (now $85,891), satisfying my entry condition. SOL's 4h pullback (-1.05%) is the mildest of the three assets — a controlled retracement, not a breakdown. I missed the ideal $125-127 entry but the breakout structure is intact. Taking a disciplined 10% position (~$498) acknowledges the ranging regime while participating in the strongest-performing asset. 90% cash preserved."
+        },
+        {
+          "ticker": "BTC/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.55,
+          "reasoning": "BTC cleared my $84,200 breakout trigger and sits at $85,891 (+3.44% 24h) — the trigger was satisfied. However, the 4h candle is -1.10%, meaning current momentum is fading. In a ranging regime, buying after a 3.44% run with declining 4h momentum risks entering near the local top. Prefer to wait for: (a) a pullback to $84,000-84,500 for a better risk/reward entry, or (b) a confirmed 4h close above $87K showing renewed trend strength. Will add BTC on a dip or breakout continuation — not here."
+        },
+        {
+          "ticker": "ETH/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.55,
+          "reasoning": "ETH has the weakest 4h reading (-1.62%) of the three assets despite solid 24h (+4.36%). It is not the momentum leader. In a capital-constrained, ranging environment, I'm allocating only to the strongest relative performer (SOL). No ETH entry until it shows 4h leadership or market regime upgrades to trending."
+        }
+      ],
+      "next_check": 3600,
+      "memory": "ENTERED SOL 10% @ $133.91 (~$498). Cash ~$4,482 (90%). BTC $85,891 (above $84.2K trigger but 4h -1.10%). ALL 4h candles negative = consolidation phase. SOL STOP: mental stop ~$128 (-4.4%). ADD LEVELS: BTC $84K-84.5K = BUY BTC 15%. SOL $128-130 = add SOL 10%. BREAKOUT ADD: BTC >$87.5K = add BTC 15% + SOL 10%. DO NOT add on 4h negative candles in ranging regime."
+    },
+    {
+      "time": "2025-03-21 00:00:00",
+      "assessment": "Ranging crypto market with all majors down 24h; BTC is defending the $84K–$84.5K support zone, but SOL has broken through its $128 floor, confirming continued weakness in higher-beta alts.",
+      "decisions": [
+        {
+          "ticker": "SOL/USDT:USDT",
+          "action": "SELL",
+          "position_pct": 0.0,
+          "confidence": 0.8,
+          "reasoning": "Mental stop at ~$128 has been definitively triggered. SOL is at $127.94, breaching the -4.46% stop level set in my previous note. The ranging crypto regime provides no momentum tailwind to justify holding through this level. Recent trade history shows losses from overstaying positions. The 4h +0.27% is a minor bounce but insufficient to invalidate the stop — the 24h print of -4.46% confirms the downtrend since entry at $133.91. Closing to protect capital. Will reassess re-entry if SOL reclaims $130+."
+        },
+        {
+          "ticker": "BTC/USDT:USDT",
+          "action": "BUY",
+          "position_pct": 0.15,
+          "confidence": 0.58,
+          "reasoning": "BTC at $84,451 sits squarely within my pre-defined accumulation range of $84K–$84.5K. The 4h candle is +0.27% — positive, meeting my explicit rule: 'DO NOT add on 4h negative candles in ranging regime.' The level was identified in advance as key support, and BTC is defending it. 90% cash gives ample room to deploy. Funding rate at 0.0000 is neutral (no crowded longs/shorts). Sizing at 15% (~$744) is disciplined for a ranging market. Mental stop: close below $83K. Target: breakout above $87.5K to add more."
+        },
+        {
+          "ticker": "ETH/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.72,
+          "reasoning": "ETH at $1,978 with 4h -0.28% and 24h -2.20%. Holding below the psychological $2K level. No open position. 4h candle is negative, violating my own add rule. No derivative data to confirm any thesis. Pass."
+        }
+      ],
+      "next_check": 1800,
+      "memory": "SOLD SOL @ $127.94 (stop hit, -4.46%). BOUGHT BTC 15% @ ~$84,452. ~80% cash. BTC STOP: $83K hard. BTC ADD: >$87.5K breakout = add 10% BTC. SOL RE-ENTRY: only if reclaims $130+. ETH: avoid until >$2K with positive 4h. Ranging regime — no momentum chasing, level-based trades only. Watch BTC $83K support."
+    },
+    {
+      "time": "2025-03-22 00:00:00",
+      "assessment": "Crypto remains in a choppy ranging regime — BTC holding above $83K support, ETH tantalizingly close to $2K trigger but not yet through, SOL below $130 re-entry; no new signals to act on, patience is the edge.",
+      "decisions": [
+        {
+          "ticker": "BTC/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.15,
+          "confidence": 0.65,
+          "reasoning": "BTC at $84,257 vs entry $84,452 (-0.23% PnL). Hard stop at $83K is intact — price is ~1.5% above it, no imminent threat. 4h slightly positive (+0.20%) but 24h flat (-0.23%), consistent with a ranging chop environment. No breakout above $87.5K add-trigger, no reason to size up. Holding the 15% position as planned. Recent losses in trade history reinforce not over-trading in this regime."
+        },
+        {
+          "ticker": "ETH/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.72,
+          "reasoning": "ETH at $1,986 — only $14 below my defined entry trigger of $2,000. 4h returning +1.03% is the strongest relative performer this session and encouraging. HOWEVER, my rule is explicit: no entry until >$2K WITH positive 4h confirmed. Price has not reclaimed the level yet. Jumping the gun in a ranging regime risks another stop-out like SOL. Staying disciplined — if ETH clearly clears $2K on next candles, enter ~10% position."
+        },
+        {
+          "ticker": "SOL/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.78,
+          "reasoning": "SOL at $128.88 — still below the $130 re-entry threshold set after stop-out at $127.94 (-4.46%). 24h +0.73% and 4h +0.31% show mild recovery but not enough. Previous -4.46% loss on SOL is a fresh reminder to respect my re-entry levels. No entry until $130+ is clearly reclaimed with momentum."
+        }
+      ],
+      "next_check": 1800,
+      "memory": "BTC pos: entry $84,452, PnL -0.23%, STOP $83K, ADD >$87.5K. ETH $1,986 — WATCH CLOSELY, $14 from $2K entry trigger (10% position if >$2K + positive 4h). SOL $128.88 — NO entry until $130+ reclaimed. ~85% cash. Ranging regime. ETH is the active setup to watch next check."
+    },
+    {
+      "time": "2025-03-23 00:00:00",
+      "assessment": "Mild risk-on bounce across BTC/ETH/SOL in a ranging regime — ETH's $2K reclaim is the key event, but with neutral funding, no CVD data, and a losing trade history suggesting persistent chop, conviction remains low and sizing is kept defensive.",
+      "decisions": [
+        {
+          "ticker": "BTC/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.55,
+          "reasoning": "Existing position at $84,452 entry, currently -0.27% PnL. Price is $84,224 — above my $83K stop but below entry. 4h is mildly positive (+0.46%) but 24h is essentially flat. Ranging regime continues. No derivatives signal. Will hold and let the position breathe — still $1,224 above stop. Recent BTC trade history shows repeated quick losses suggesting the market is whipsawing; no reason to add here."
+        },
+        {
+          "ticker": "ETH/USDT:USDT",
+          "action": "BUY",
+          "position_pct": 0.07,
+          "confidence": 0.6,
+          "reasoning": "My pre-planned trigger has fired: ETH broke above $2,000 (now $2,008.31) with a positive 4h (+1.39%) and positive 24h (+1.12%). Both conditions set in previous note are met. $2,000 is a major psychological level — holding above it is constructive. However, I'm reducing target size from planned 10% to 7% given: (1) ranging regime — breakouts can fail, (2) recent trade history shows consistent losses indicating chop, (3) no CVD/L/S data to confirm directional conviction. Entry here with tight stop below $1,960 (~2.4% risk). If $2K holds as support, position can be added to."
+        },
+        {
+          "ticker": "SOL/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.5,
+          "reasoning": "SOL has reclaimed $130 (now $130.85) with the strongest 4h momentum (+1.82%), which technically meets my prior trigger. HOWEVER: recent SOL trade logged a -4.46% loss — the worst in recent history — suggesting SOL has been especially choppy and prone to sharp reversals. In a ranging regime with no derivatives data and a fresh loss on this ticker, I am not chasing this move. I want to see SOL consolidate above $130 for at least one more candle close before committing. Will re-evaluate next check."
+        }
+      ],
+      "next_check": 1200,
+      "memory": "BTC: hold, entry $84,452, stop $83K. ETH: ENTERED 7% at ~$2,008, stop $1,960 — watching $2K as new support. SOL $130.85 — NO entry yet, need consolidation above $130 before adding. Recent trade losses (-2%, -1.6%, -4.5%) confirm ranging chop — keep sizes small. Portfolio: ~70% cash, two small longs. Next check 20min."
+    },
+    {
+      "time": "2025-03-24 00:00:00",
+      "assessment": "Crypto is in a confirmed trending regime led by SOL (+5.6% 24h) and BTC (+2.7% 24h), with ETH lagging — healthy rotation signal with zero funding pressure and macro at neutral exposure scale.",
+      "decisions": [
+        {
+          "ticker": "BTC/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.78,
+          "reasoning": "BTC position entered at $84,451.96 is now up +2.46% — let winners run. Price at $86,532 shows continued strength with a clean +2.74% 24h move. Funding at 0.0000 confirms no crowded longs, healthy structure. Trending regime supports continuation. No reason to add here as price is extended intraday; hold with stop at $83K which gives ample room. Position is ~15% of portfolio, sized well."
+        },
+        {
+          "ticker": "ETH/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.55,
+          "reasoning": "ETH is the laggard: only +0.31% in 24h vs BTC's +2.74% and SOL's +5.59%. This relative weakness is a yellow flag in a trending regime where capital rotates to the strongest assets. However, position is slightly profitable (+0.31%) and still above entry $2,008. $2,000 is holding as support. Holding for now but will cut quickly if ETH fails $2,000 while BTC/SOL continue higher — that would signal capital rotation away from ETH. Position is only ~6% of portfolio so the opportunity cost of holding is acceptable short-term."
+        },
+        {
+          "ticker": "SOL/USDT:USDT",
+          "action": "BUY",
+          "position_pct": 0.08,
+          "confidence": 0.7,
+          "reasoning": "SOL is the clear leader: +4.00% in 4h and +5.59% in 24h. My previous note specified 'NO entry yet, need consolidation above $130' — SOL has definitively cleared that condition and accelerated to $138.16. In a confirmed trending regime, this type of relative strength with clean momentum deserves exposure. Funding at 0.0000 means zero overleveraged longs to squeeze out — a clean, organic move. Entering 8% position (~$398). Natural stop around $132-133 (4h consolidation base), representing ~3.8% downside from entry. Risk to portfolio = 8% × 3.8% ≈ 0.30% — well within risk tolerance. If trend continues, targets $148-155 range."
+        }
+      ],
+      "next_check": 900,
+      "memory": "BTC: HOLD, entry $84,452, +2.46% PnL, stop $83K. ETH: HOLD, entry $2,008, +0.31%, stop $1,960 — underperforming, watch $2K support. SOL: ENTERED ~$138.16, 8% position, stop $132-133. Regime: trending. Cash ~71%. If SOL holds and pushes $145+, consider adding 5% more. Cut ETH if breaks $2K while BTC/SOL continue up."
+    },
+    {
+      "time": "2025-03-25 00:00:00",
+      "assessment": "Markets are rotating into a ranging regime with synchronized 4h pullbacks across BTC/ETH/SOL and zero funding rate pressure; all positions remain in profit but the trending thesis that drove entries has weakened, demanding patience over new risk-taking.",
+      "decisions": [
+        {
+          "ticker": "BTC/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.15,
+          "confidence": 0.72,
+          "reasoning": "BTC holds +2.45% PnL from entry $84,452. Regime has shifted trending → ranging since last check, which reduces momentum continuation confidence. 4h is -1.12% but 24h is essentially flat — no directional conviction either way. Funding at 0.0000 confirms market neutrality. No CVD or L/S data to triangulate. Stop at $83K provides ample cushion (~4% below current). In a ranging market, a profitable position with intact stop is worth holding — no forced action."
+        },
+        {
+          "ticker": "ETH/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.06,
+          "confidence": 0.63,
+          "reasoning": "ETH at $2,043, +1.74% PnL. Most importantly, $2,000 support is HOLDING — the critical level flagged last check. 24h return of +1.43% is the strongest of the three assets, indicating relative strength vs BTC/SOL. However, 4h pullback of -1.82% is the sharpest of the group. Ranging regime makes adding here unattractive. Hold with stop below $1,990. If $2K cracks while BTC/SOL hold, ETH weakness becomes idiosyncratic and warrants a cut."
+        },
+        {
+          "ticker": "SOL/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.063,
+          "confidence": 0.52,
+          "reasoning": "SOL at $138.57, barely +0.30% PnL — effectively breakeven. The $145 breakout thesis has NOT materialized. 4h weakness of -1.73% is notable. Crucially: prior trade history shows a -4.46% SOL loss, a reminder that this asset can move against positions fast. Ranging regime means momentum is unreliable. However, stop is at $135 (tightened from prior $132-133 note), trade is small (~6%), and position has not triggered any exit signal yet. HOLD but this is the weakest conviction hold — loss of $136 would prompt serious reassessment."
+        }
+      ],
+      "next_check": 3600,
+      "memory": "REGIME SHIFT: trending → ranging. BTC: HOLD, entry $84,452, +2.45%, stop $83K. ETH: HOLD, entry $2,008, +1.74%, $2K support intact — watch closely. SOL: HOLD, entry $138.16, +0.30%, stop tightened to $135; weakest conviction. Cash: ~72%. NO new entries until range break. Loss pattern history (BTC -2%, SOL -4.5%) demands discipline. Next trigger: BTC <$85K or >$88.5K."
+    },
+    {
+      "time": "2025-03-26 00:00:00",
+      "assessment": "Regime has re-confirmed trending; all three positions are profitable and defensible, but 4h pullbacks across the board suggest a brief consolidation phase before the next leg — patience favored over new entries.",
+      "decisions": [
+        {
+          "ticker": "BTC/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.73,
+          "reasoning": "BTC at $87,153 with +3.20% open profit from entry $84,452. Key update: regime has shifted BACK to 'trending' from the ranging context noted last cycle — this is bullish for the existing position. 4h return of -0.27% is a minor pause, not a reversal signal. Price is ~$1,350 below my $88.5K trigger level for potential additional sizing. Stop at $83K remains valid (~4.6% below current). Funding flat at 0.0000 — no speculative excess. Trending regime + profitable position = disciplined hold."
+        },
+        {
+          "ticker": "ETH/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.63,
+          "reasoning": "ETH at $2,049 (+2.03% from entry $2,008). $2K psychological support continues to hold — price is $49 above it. 4h weakness of -0.83% is the second weakest performer on the short timeframe, suggesting ETH is lagging BTC and SOL in the current trend. 24h of only +0.28% reinforces relative weakness. Hold maintained but this remains the position I'd cut first on a deterioration. Stop tightened conceptually to $1,985 (just below $2K round number)."
+        },
+        {
+          "ticker": "SOL/USDT:USDT",
+          "action": "HOLD",
+          "position_pct": 0.0,
+          "confidence": 0.61,
+          "reasoning": "SOL at $141.84 (+2.66% from entry $138.16). Strongest 24h performer at +2.36%, but the worst 4h at -1.25% — momentum fading intrabar. Historical SOL loss of -4.46% in trade history demands I respect downside risk. Stop at $135 (~4.8% from current) provides buffer. Trending regime supports the position, but SOL's higher beta means faster reversal risk. No additions — current size (~6.4% of portfolio) is appropriate. Holding with firm stop discipline."
+        }
+      ],
+      "next_check": 1800,
+      "memory": "TRENDING regime re-confirmed (was ranging last note). All positions profitable: BTC +3.20% ($87,153, entry $84,452, stop $83K), ETH +2.03% ($2,049, entry $2,008, stop $1,985), SOL +2.66% ($141.84, entry $138.16, stop $135). ETH = weakest conviction, cut first on deterioration. Cash 72%. BTC trigger: ADD on break >$88.5K. 4h weakness across board = consolidation, not reversal. Next: confirm trend resumes before adding."
+    }
+  ]
+}

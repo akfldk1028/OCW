@@ -1,0 +1,26 @@
+app = "ocw-trader"
+primary_region = "nrt"  # Tokyo — lowest latency to Binance
+
+[build]
+  dockerfile = "binance/Dockerfile"
+
+[env]
+  PYTHONUNBUFFERED = "1"
+  BINANCE_PAPER = "true"
+  LIVE_TRADING = "false"
+  LOG_LEVEL = "INFO"
+
+# No HTTP service — background worker only
+[processes]
+  trader = "python -u main.py --testnet"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "2048mb"
+  processes = ["trader"]
+
+# Single persistent volume for all state
+[[mounts]]
+  source = "trader_state"
+  destination = "/state"
+  processes = ["trader"]

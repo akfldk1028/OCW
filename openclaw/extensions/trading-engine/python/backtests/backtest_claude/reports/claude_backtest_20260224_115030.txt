@@ -1,0 +1,50 @@
+============================================================
+  CLAUDE AGENT SIMULATION BACKTEST
+============================================================
+  Period: 2025-03-01 ~ (days=14)
+  Initial: $5,000 -> Final: $4,975
+
+  --- Performance ---
+  Return:     -0.5%
+  Sharpe:     -0.92
+  MDD:        -0.9%
+  Alpha(BTC): +4.2% (BTC B&H: -4.7%)
+
+  --- Trades ---
+  Total:      9
+  Win rate:   0% (3 sells)
+  Avg Win:    +0.0%
+  Avg Loss:   -2.7%
+  Risk exits: 0 (0%)
+
+  --- Claude ---
+  Calls:      14
+  Failures:   0
+============================================================
+
+TRADE LOG:
+  2025-03-13 00:00 BUY  BTC/USDT        @ $83,577.14  PnL=+0.0%  Fresh portfolio, ranging market with neutral signa
+  2025-03-14 00:00 SELL BTC/USDT        @ $81,888.77  PnL=-2.0%  My previous session note flagged $82K as key suppo
+  2025-03-15 00:00 BUY  BTC/USDT        @ $84,491.99  PnL=+0.0%  BTC at $84,491 has decisively reclaimed my previou
+  2025-03-18 00:00 SELL BTC/USDT        @ $83,147.60  PnL=-1.6%  Closing long. Entry $84,491.99, current $83,147.60
+  2025-03-20 00:00 BUY  SOL/USDT        @ $133.91  PnL=+0.0%  SOL is the 24h momentum leader (+5.88%) and was my
+  2025-03-21 00:00 SELL SOL/USDT        @ $127.94  PnL=-4.5%  Mental stop at ~$128 has been definitively trigger
+  2025-03-21 00:00 BUY  BTC/USDT        @ $84,451.96  PnL=+0.0%  BTC at $84,451 sits squarely within my pre-defined
+  2025-03-23 00:00 BUY  ETH/USDT        @ $2,008.31  PnL=+0.0%  My pre-planned trigger has fired: ETH broke above 
+  2025-03-24 00:00 BUY  SOL/USDT        @ $138.16  PnL=+0.0%  SOL is the clear leader: +4.00% in 4h and +5.59% i
+
+CLAUDE DECISIONS (sample):
+  2025-03-13 00:00: Market is in a low-conviction range with neutral funding, missing derivatives da
+  2025-03-14 00:00: BTC has broken below its $82K support in a trending regime with no perp-market c
+  2025-03-15 00:00: BTC has reclaimed prior resistance convincingly ($82K→$84.5K) but the regime cla
+  2025-03-16 00:00: Market is in deep consolidation — BTC essentially unchanged over 24h, all fundin
+  2025-03-17 00:00: BTC teetering near $83K stop with a weak 4h bounce; SOL approaching target entry
+  2025-03-18 00:00: Broad crypto sell-off continues in a ranging regime — BTC has breached my stop t
+  2025-03-19 00:00: BTC is teetering on the $83K make-or-break support with only a marginal 4h bounc
+  2025-03-20 00:00: The 24h crypto rally is real and BTC has cleared key resistance, but all 4h cand
+  2025-03-21 00:00: Ranging crypto market with all majors down 24h; BTC is defending the $84K–$84.5K
+  2025-03-22 00:00: Crypto remains in a choppy ranging regime — BTC holding above $83K support, ETH 
+  2025-03-23 00:00: Mild risk-on bounce across BTC/ETH/SOL in a ranging regime — ETH's $2K reclaim i
+  2025-03-24 00:00: Crypto is in a confirmed trending regime led by SOL (+5.6% 24h) and BTC (+2.7% 2
+  2025-03-25 00:00: Markets are rotating into a ranging regime with synchronized 4h pullbacks across
+  2025-03-26 00:00: Regime has re-confirmed trending; all three positions are profitable and defensi

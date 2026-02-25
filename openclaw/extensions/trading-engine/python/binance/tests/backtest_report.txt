@@ -1,0 +1,296 @@
+======================================================================
+  1-YEAR BACKTEST: Regime Blend Pipeline (runner.py logic)
+  Period: 2025-02-01 ~ 2026-02-01
+  Initial: $5,000
+  Tickers: ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
+  Params: exposure=0.7, position=0.3, trail=0.12, dd_trigger=0.15
+======================================================================
+
+Data: 515 total bars, backtesting 365 days
+BTC range: $53,949 ~ $124,753
+
+----------------------------------------------------------------------
+DATE         EVENT           TICKER     SIDE       PRICE        QTY      PnL REASON
+----------------------------------------------------------------------
+2025-02-04   PIPELINE BUY    ETH/USDT   BUY   $    2,735     0.5484          ranging: RANGE: px<bb_low rsi=24
+2025-02-04   PIPELINE BUY    BTC/USDT   BUY   $   97,872     0.0153          ranging: RANGE: px<bb_low rsi=39
+2025-02-19   PIPELINE BUY    SOL/USDT   BUY   $      169     8.8175          ranging: RANGE: px<bb_low rsi=20
+2025-02-24   RISK EXIT       SOL/USDT   SELL  $      142     8.8175  -16.0% dd_exit
+2025-02-25   PIPELINE SELL   ETH/USDT   SELL  $    2,494     0.5484   -8.8% trending: TREND_EXIT: mom=-8.9%
+2025-02-25   PIPELINE SELL   BTC/USDT   SELL  $   88,736     0.0153   -9.3% trending: TREND_EXIT: mom=-9.3%
+2025-03-30   PIPELINE BUY    ETH/USDT   BUY   $    1,806     0.7442          ranging: RANGE: px<bb_low rsi=27
+2025-04-02   PIPELINE BUY    SOL/USDT   BUY   $      118    11.3914          ranging: RANGE: px<bb_low rsi=31
+2025-04-08   RISK EXIT       ETH/USDT   SELL  $    1,473     0.7442  -18.5% dd_exit
+2025-04-08   PIPELINE SELL   SOL/USDT   SELL  $      106    11.3914  -10.4% trending: TREND_EXIT: mom=-23.1%
+2025-04-23   PIPELINE BUY    BTC/USDT   BUY   $   93,699     0.0131          trending: TREND: rsi=81 mom=+17.7%
+2025-04-23   PIPELINE BUY    ETH/USDT   BUY   $    1,796     0.6826          trending: TREND: rsi=70 mom=+18.0%
+2025-04-23   PIPELINE BUY    SOL/USDT   BUY   $      151     8.1089          trending: TREND: rsi=77 mom=+34.0%
+2025-05-30   RISK EXIT       SOL/USDT   SELL  $      156     8.1089   +3.4% trail_stop (high=184)
+2025-06-01   PIPELINE BUY    SOL/USDT   BUY   $      158     9.0998          ranging: RANGE: px<bb_low rsi=32
+2025-06-10   PIPELINE SELL   BTC/USDT   SELL  $  110,257     0.0131  +17.7% ranging: RANGE_EXIT: px>bb_up
+2025-06-10   PIPELINE SELL   ETH/USDT   SELL  $    2,814     0.6826  +56.6% ranging: RANGE_EXIT: px>bb_up
+2025-06-22   RISK EXIT       SOL/USDT   SELL  $      132     9.0998  -16.6% dd_exit
+2025-06-22   PIPELINE BUY    ETH/USDT   BUY   $    2,228     0.6451          ranging: RANGE: px<bb_low rsi=19
+2025-06-22   PIPELINE BUY    SOL/USDT   BUY   $      132    10.9182          ranging: RANGE: px<bb_low rsi=23
+2025-06-22   PIPELINE BUY    BTC/USDT   BUY   $  100,987     0.0142          ranging: RANGE: px<bb_low rsi=26
+2025-07-30   RISK EXIT       SOL/USDT   SELL  $      178    10.9182  +35.0% trail_stop (high=206)
+2025-08-02   RISK EXIT       ETH/USDT   SELL  $    3,393     0.6451  +52.3% trail_stop (high=3875)
+2025-08-12   PIPELINE SELL   BTC/USDT   SELL  $  120,173     0.0142  +19.0% ranging: RANGE_EXIT: px>bb_up
+2025-08-21   PIPELINE BUY    BTC/USDT   BUY   $  112,419     0.0168          ranging: RANGE: px<bb_low rsi=33
+2025-08-30   PIPELINE SELL   BTC/USDT   SELL  $  108,808     0.0168   -3.2% trending: TREND_EXIT: mom=-7.4%
+2025-08-30   PIPELINE BUY    SOL/USDT   BUY   $      203     9.2340          trending: TREND: rsi=55 mom=+6.1%
+2025-09-11   PIPELINE SELL   SOL/USDT   SELL  $      229     9.2340  +12.8% ranging: RANGE_EXIT: px>bb_up
+2025-09-23   PIPELINE BUY    ETH/USDT   BUY   $    4,166     0.4666          ranging: RANGE: px<bb_low rsi=26
+2025-09-26   PIPELINE BUY    BTC/USDT   BUY   $  109,713     0.0175          ranging: RANGE: px<bb_low rsi=31
+2025-10-02   PIPELINE SELL   BTC/USDT   SELL  $  120,681     0.0175  +10.0% ranging: RANGE_EXIT: px>bb_up
+2025-10-10   RISK EXIT       ETH/USDT   SELL  $    3,843     0.4666   -7.7% trail_stop (high=4688)
+2025-10-11   PIPELINE BUY    SOL/USDT   BUY   $      178    10.9742          ranging: RANGE: px<bb_low rsi=24
+2025-10-11   PIPELINE BUY    ETH/USDT   BUY   $    3,751     0.5208          ranging: RANGE: px<bb_low rsi=25
+2025-10-17   RISK EXIT       SOL/USDT   SELL  $      182    10.9742   +2.2% trail_stop (high=208)
+2025-10-17   PIPELINE BUY    BTC/USDT   BUY   $  106,468     0.0186          ranging: RANGE: px<bb_low rsi=26
+2025-11-03   RISK EXIT       ETH/USDT   SELL  $    3,602     0.5208   -4.0% trail_stop (high=4245)
+2025-11-04   PIPELINE SELL   BTC/USDT   SELL  $  101,591     0.0186   -4.6% trending: TREND_EXIT: mom=-5.7%
+2025-12-10   PIPELINE BUY    ETH/USDT   BUY   $    3,325     0.5753          trending: TREND: rsi=70 mom=+10.3%
+2025-12-16   PIPELINE BUY    BTC/USDT   BUY   $   87,844     0.0211          ranging: RANGE: px<bb_low rsi=40
+2025-12-22   PIPELINE SELL   ETH/USDT   SELL  $    3,006     0.5753   -9.6% trending: TREND_EXIT: mom=-9.5%
+2025-12-25   PIPELINE BUY    SOL/USDT   BUY   $      120    15.4455          ranging: RANGE: px<bb_low rsi=29
+2026-01-03   PIPELINE SELL   BTC/USDT   SELL  $   90,603     0.0211   +3.1% ranging: RANGE_EXIT: px>bb_up
+2026-01-03   PIPELINE SELL   SOL/USDT   SELL  $      133    15.4455  +11.1% ranging: RANGE_EXIT: px>bb_up
+2026-01-06   PIPELINE BUY    ETH/USDT   BUY   $    3,296     0.5868          trending: TREND: rsi=86 mom=+11.9%
+2026-01-06   PIPELINE BUY    SOL/USDT   BUY   $      141    13.7030          trending: TREND: rsi=83 mom=+15.2%
+2026-01-06   PIPELINE BUY    BTC/USDT   BUY   $   93,729     0.0206          trending: TREND: rsi=79 mom=+7.0%
+2026-01-25   RISK EXIT       SOL/USDT   SELL  $      119    13.7030  -15.8% dd_exit
+2026-01-25   PORTFOLIO DD    ETH/USDT   SELL  $    2,816     0.5868  -14.6% portfolio_dd=13.8%
+2026-01-25   PORTFOLIO DD    BTC/USDT   SELL  $   86,572     0.0206   -7.6% portfolio_dd=13.8%
+----------------------------------------------------------------------
+
+======================================================================
+  PERFORMANCE REPORT
+======================================================================
+
+  Period:           2025-02-01 ~ 2026-02-01 (365 days)
+  Initial Capital:  $5,000
+  Final Value:      $5,701
+  Total Return:     +14.0%
+  BTC Buy & Hold:   -21.9%
+  Alpha vs BTC:     +35.9%
+  Sharpe Ratio:     0.57
+  Max Drawdown:     -20.2% (on 2025-05-04)
+  BTC Max Drawdown: -37.0%
+
+  --- Trade Stats ---
+  Total Trades:     50 (25 round-trips)
+  Win Rate:         44% (11W / 14L)
+  Avg Win:          +20.3%
+  Avg Loss:         -10.5%
+  Risk Exits:       12 (trail stops + drawdown)
+
+  --- Regime Breakdown ---
+  ranging        75 days (61%)
+  trending       47 days (39%)
+
+  --- Top 5 Best Trades ---
+  2025-06-10 ETH/USDT    +56.6% ($1,796 -> $2,814) ranging: RANGE_EXIT: px>bb_up
+  2025-08-02 ETH/USDT    +52.3% ($2,228 -> $3,393) RISK: trail_stop (high=3875)
+  2025-07-30 SOL/USDT    +35.0% ($132 -> $178) RISK: trail_stop (high=206)
+  2025-08-12 BTC/USDT    +19.0% ($100,987 -> $120,173) ranging: RANGE_EXIT: px>bb_up
+  2025-06-10 BTC/USDT    +17.7% ($93,699 -> $110,257) ranging: RANGE_EXIT: px>bb_up
+
+  --- Top 5 Worst Trades ---
+  2026-01-25 ETH/USDT    -14.6% ($3,296 -> $2,816) PORTFOLIO DD 13.8%
+  2026-01-25 SOL/USDT    -15.8% ($141 -> $119) RISK: dd_exit
+  2025-02-24 SOL/USDT    -16.0% ($169 -> $142) RISK: dd_exit
+  2025-06-22 SOL/USDT    -16.6% ($158 -> $132) RISK: dd_exit
+  2025-04-08 ETH/USDT    -18.5% ($1,806 -> $1,473) RISK: dd_exit
+
+  --- Monthly Returns ---
+  2025-03  Strategy:  +0.3%  BTC:  -2.2%  
+  2025-04  Strategy:  -9.6%  BTC: +14.1%  ---------
+  2025-05  Strategy: +17.4%  BTC: +11.1%  +++++++++++++++++
+  2025-06  Strategy: +11.0%  BTC:  +2.4%  +++++++++++
+  2025-07  Strategy: +21.8%  BTC:  +8.0%  +++++++++++++++++++++
+  2025-08  Strategy:  -3.4%  BTC:  -6.5%  ---
+  2025-09  Strategy:  +5.1%  BTC:  +5.4%  +++++
+  2025-10  Strategy:  +1.7%  BTC:  -3.9%  +
+  2025-11  Strategy:  -4.2%  BTC: -17.5%  ----
+  2025-12  Strategy:  -2.0%  BTC:  -3.2%  --
+  2026-01  Strategy:  -8.8%  BTC: -10.2%  --------
+
+======================================================================
+
+
+  ❯ 그러나 김 씨는 수익률에만
+    집중한 다른 참가자들과 달리
+    거시경제 움직임을 반영한
+    안정성 높은 알고리즘을 만들었고,
+    결과는 우승이었습니다
+
+    (인터뷰)김민겸/UNIST 산업공학과 '모든
+    거시 경제의 상황에 대비할 수 있는,
+    어떻게 보면 올웨더 포트폴리오(변동성
+    방어용)라고 불릴 수 있는 그런 풀(전략
+    모음)을 만들고 싶었어요.'
+
+    이번 우승으로 인턴십을
+    제안받은 김 씨는 내년 7월부터
+    월드퀀트 한국지사에서
+    실무 경험을 쌓을 예정입니다. 이거
+    보다가 말앗다 이게중요한데 이거관련
+    다찾아야하늗 ㅔ
+
+p
+  이미 구현되어 있는 것:
+  - runner.py: 4개 동시 루프 (결정/리스크/포지션추적/하트비트)
+  - agent_evaluator.py: 5-시그널 가중평가
+  (레짐변화/모멘텀반전/상관관계/PnL/시간디케이)
+  - online_learner.py: Thompson Sampling RL (매 거래 후 Beta 분포 업데이트)
+  - position_tracker.py: 30초 가격체크 + 3분 에이전트 재평가
+  - Binance testnet .env 이미 설정됨
+
+  이거 인터넷더봐야하는거 아냐? 요즘 이 도메인에서 유명한 시그널 더잇을거같은데
+  그리고 강화학습이게 최선인건지 한번더 보고
+  openclaw 기능을 최대한 활용하고잇는지도 ㅗㅂ고
+
+엥 언제까지해  아오 빠르게안되나 젠장
+
+ 그리고 니가 구별하는게 그냥
+    하드코딩으로텟그트중아냐 ? agent 가 계속 판별하고 할텐데 이게 그냥 백테스팅이
+    되는가에대한의심 ?  openclaw 가 직접판단하고 우린 서폿만하고 그걸 강화학습도
+    넣고 안되겟니 ?
+
+
+
+    ❯ playwright mcp 겨서 https://www.binance.com/en/my/settings/api-management 여기서 api 받고 실제
+  거래되는지도 테스트하고 수익률 테스해야한느거억남? 아냐 ? 뭔가 두리뭉실하고 다음 ai 가 이거로직 완벽하게
+  이해할수잇게 로직정리햇ㅇ ㅓ?
+
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯차트 뭐뭐 봣는지 얼마에 한번씩 거래한건지 그리고 buy sell 이거 제대로 로그 찍히는지 그리고
+  트레이딩뷰에 연결하면 뭐 제대로 표시가되는지 뭐 코인머머사는지 수익률 얼마인지  판 이유가뭔지 이런거
+  제대로 기록남아아햐하는데 log 도 중요한요소중에하나야 강화학습은 이와중에 되고잇는지
+───────────────────────────────────────────────────────────────────────────────────────────
+
+● 맞습니다. REST API로 OHLCV를 매번 가져와서 IP ban 걸린 겁니다. Binance 에러
+   메시지도 "Please use WebSocket Streams"라고 하네요.
+
+  현재 구조:
+  - WS: kline 스트림 이미 연결됨 (market_listener.py) — 실시간 데이터 수신 중
+  - REST: broker.get_ohlcv() — Claude 결정마다 4 tickers × OHLCV fetch = 결정
+   1회당 4번 REST 호출
+  - 81 결정 × 4 = 324번 REST → IP ban
+
+  WS에서 이미 받고 있는 kline 데이터를 캐시해서 쓰면 REST 호출 대부분 제거
+  가능합니다. 확인하겠습니다:
+
+● Searched for 2 patterns, read 1 file
+근데이게 agent 가 다양한 그 시간봉차트를 볼수잇나 ?
+
+
+  1. MarketListener가 이미 WS kline 데이터를 수신하고 있음 — 여기서 closed
+  candle 데이터를 OHLCV DataFrame으로 축적
+  2. runner._fetch_ohlcv_df()가 REST로 OHLCV를 가져오는데, 이걸 WS 축적
+  데이터로 대체
+  3. 시작 시 REST 1회만 bootstrap, 이후 WS close 이벤트로 업데이트
+
+  구현하겠습니다.
+
+● Searching for 2 patterns, r
+
+근데그게궁금한거지 막  여러 시간 차트바를 보긴하는거야? agent가 ?
+보통 ws 면 그냥 스트리밍으로 계속들어오지않나? 아닌가
+
+한번 보고 다시안보는게 아닌건지
+
+ 잘 돌아갑니다. IP ban 없이 bootstrap 후 WS-only 모드로 전환 완료.
+
+  ---
+  질문에 답변하자면:
+
+  네, agent는 여러 시간봉 차트를 봅니다. 동작 방식:
+
+  1. WS는 15m/1h/4h 3개 timeframe을 동시 구독 — btcusdt@kline_15m,
+  btcusdt@kline_1h, btcusdt@kline_4h 등 12개 스트림이 실시간으로 계속 들어옴
+  2. WS 데이터가 2곳에 축적됨:
+    - OHLCVStore — 1h 봉이 close될 때마다 자동 추가 (bootstrap 481개 + WS
+  close). Claude가 결정할 때 _fetch_ohlcv_df()로 전체 히스토리를
+  DataFrame으로 가져감
+    - MultiTFAggregator — 15m/1h/4h 모든 close 봉을 축적해서 RSI, EMA cross,
+  방향성 등 TA 요약을 생성
+  3. Claude가 깨어날 때 보는 것:
+    - close_df: 1h 봉 481개+ 히스토리 (4개 티커)
+    - multi_tf_summary: 15m/1h/4h 각각의 RSI, EMA, 방향성, 거래량 추세
+    - 실시간 가격, 24h 변화율, 4h 변화율
+  4. "한번 보고 끝"이 아님:
+    - WS는 24/7 계속 스트리밍
+    - 매 candle close마다 OHLCVStore에 새 바가 추가됨
+    - Claude가 다음에 깨어나면 업데이트된 데이터를 봄
+    - REST는 시작 시 1회만 — 히스토리 bootstrap 용
+
+  정리하면: REST 1회 → 히스토리 로딩, 그 이후 WS가 실시간으로 계속 바를 축적
+  → Claude 깨어날 때마다 최신 데이터
+  1
+❯ 수익은 검증된거야? 수익적은 측면 skill  알고리즘 이런거 적인 측면에서
+  테스트 좀길게해보도되자나 그리고 ㅁgent가 잘판단하는지 risk 관리하는지
+   순차적으로생악해봐 돌려놓고 4시간잘꺼임
+
+
+Update(core\agent_evaluator.py)
+  ⎿  Added 7 lines, removed 11 lines
+      292      regime_detector: Any = None,
+      293      crypto_regime_detector: Any = None,
+      294      binance_broker: Any = None,
+      295 +    btc_price: float = 0.0,
+      296 +    btc_change_1h: float = 0.0,
+      297  ) -> Dict[str, Any]:
+      298      """Build current market context for agent evaluation.
+      299
+      300      Called by PositionTracker's context_provider.
+      301 +    btc_price/btc_change_1h: passed from WS tick cache (avo
+          +ids REST).
+      302      """
+      303      context: Dict[str, Any] = {}
+      304
+     ...
+      320          except Exception:
+      321              pass
+      322
+      320 -    # BTC reference price + change (for correlation risk)
+      321 -    if binance_broker is not None and binance_broker.is_con
+          -nected:
+      322 -        try:
+      323 -            btc_ohlcv = binance_broker.fetch_ohlcv("BTC/USD
+          -T", "1h", limit=2)
+      324 -            if len(btc_ohlcv) >= 2:
+      325 -                prev_close = btc_ohlcv[-2][4]
+      326 -                curr_close = btc_ohlcv[-1][4]
+      327 -                context["btc_price"] = curr_close
+      328 -                context["btc_change_1h"] = (curr_close - pr
+          -ev_close) / prev_close if prev_close > 0 else 0.0
+      329 -        except Exception:
+      330 -            pass
+      323 +    # BTC reference price + change (from WS tick cache — ze
+          +ro REST calls)
+      324 +    if btc_price > 0:
+      325 +        context["btc_price"] = btc_price
+      326 +        context["btc_change_1h"] = btc_change_1h
+      327
+      328      return context
+
+● runner.py에서 context_provider가 WS 가격
+
+이러면 btc 밖에안보는거아님? 다른 코인봄 ?
+ 또한 _run_decision에서 broker.get_account_status()와
+  broker.get_positions_detail()도 REST 호출입니다. 이건 필수적이지만
+  dry_run에서는 줄일 수 있습니다. 일단 OHLCV 제거가 가장 큰 개선이니 먼저
+  테스트합니다.
+
+● Bash(cd /d/Data/29_OCW/openclaw/extensions/trading-engine/python && python3
+       -c "import ast; ast.parse(open('core/agent_evaluator.py',
+      encoding='utf-8').read()); prin…)
+  ⎿  agent_evaluator OK
+     runner OK
+
+● 이제 _run_decision 내의 남은 REST 호출을 확인합니다. dry_run에서
+  get_account_status()와 get_positions_detail()이 REST를 쓰는데, WS tick 가격
+   + tracker로 대체 가능합니다.

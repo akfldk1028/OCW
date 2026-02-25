@@ -134,7 +134,8 @@
       "Bash(fly status:*)",
       "Bash(powershell.exe:*)",
       "WebFetch(domain:claude-did-this.com)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(C:/Users/SOGANG1/.fly/bin/flyctl.exe ssh:*)"
     ]
   }
 }
