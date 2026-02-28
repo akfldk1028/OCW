@@ -79,8 +79,9 @@ class MarketListener:
         # OHLCV store — WS candle closes feed into this (replaces REST polling)
         self._ohlcv_store = ohlcv_store
 
-        # State
+        # State — per-ticker cooldown so BTC candle close doesn't block ETH/SOL
         self._last_decision_time: float = 0.0
+        self._last_decision_times: Dict[str, float] = {}
         self._last_decision_prices: Dict[str, float] = {}
         self._running = False
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
@@ -182,12 +183,14 @@ class MarketListener:
             await self._check_significant_move(ticker, close_price)
 
     async def _emit_candle_close(self, ticker: str, price: float, kline: dict) -> None:
-        """Emit candle close event with cooldown debounce."""
+        """Emit candle close event with per-ticker cooldown debounce."""
         now = time.time()
-        if now - self._last_decision_time < self._min_decision_gap:
+        last_time = self._last_decision_times.get(ticker, 0)
+        if now - last_time < self._min_decision_gap:
             return
 
-        self._last_decision_time = now
+        self._last_decision_times[ticker] = now
+        self._last_decision_time = now  # keep global for significant_move check
         self._last_decision_prices[ticker] = price
 
         logger.info("[event] Candle close (%s): %s @ %.2f", self._primary_interval, ticker, price)

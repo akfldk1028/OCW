@@ -1,101 +1,234 @@
 "use client";
 
+import { useState } from "react";
 import { useTrades } from "@/lib/hooks";
 import { clsx } from "clsx";
 
+function fmt$(n: number) {
+  return n >= 1000
+    ? `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : `$${n.toFixed(4)}`;
+}
+
 export default function TradesTable() {
   const { data, isLoading } = useTrades(50);
+  const [isOpen, setIsOpen] = useState(false);
+  const [expandedRow, setExpandedRow] = useState<number | null>(null);
 
-  if (isLoading) return <div className="card animate-pulse h-48" />;
+  if (isLoading) return <div className="card animate-pulse h-20" />;
   if (!data) return null;
 
   const { summary } = data;
+  const cumPnl = summary.cumulative_pnl_pct; // API already returns as %
 
   return (
     <div className="card">
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-sm font-medium text-[var(--muted)]">
-          Trade History
-        </h2>
-        <div className="flex items-center gap-3 text-xs text-[var(--muted)]">
-          <span>
-            W/L: {summary.wins}/{summary.losses}
-          </span>
-          <span>WR: {(summary.win_rate * 100).toFixed(0)}%</span>
-          <span
-            className={clsx(
-              "font-mono",
-              summary.cumulative_pnl_pct >= 0
-                ? "text-[var(--green)]"
-                : "text-[var(--red)]"
-            )}
-          >
-            PnL: {(summary.cumulative_pnl_pct * 100).toFixed(2)}%
-          </span>
+      {/* Collapsible header */}
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full flex items-center justify-between hover:opacity-80 transition-opacity"
+      >
+        <div className="flex items-center gap-3">
+          <h2 className="text-sm font-medium text-[var(--muted)]">
+            Trade History
+          </h2>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-green-900/20 text-[var(--green)]">
+              {summary.wins}W
+            </span>
+            <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-red-900/20 text-[var(--red)]">
+              {summary.losses}L
+            </span>
+            <span className="text-xs font-mono text-[var(--muted)]">
+              WR {(summary.win_rate * 100).toFixed(0)}%
+            </span>
+            <span
+              className={clsx(
+                "text-xs font-mono font-bold",
+                cumPnl >= 0 ? "text-[var(--green)]" : "text-[var(--red)]"
+              )}
+            >
+              {cumPnl >= 0 ? "+" : ""}
+              {cumPnl.toFixed(2)}%
+            </span>
+          </div>
         </div>
-      </div>
+        <span
+          className={clsx(
+            "text-[var(--muted)] transition-transform duration-200 text-sm",
+            isOpen && "rotate-180"
+          )}
+        >
+          ▼
+        </span>
+      </button>
 
-      {data.trades.length === 0 ? (
-        <p className="text-sm text-[var(--muted)]">No trades executed yet</p>
-      ) : (
-        <div className="overflow-x-auto max-h-[300px] overflow-y-auto">
-          <table className="w-full text-sm">
-            <thead className="sticky top-0 bg-[var(--card)]">
-              <tr className="text-[var(--muted)] text-xs border-b border-[var(--border)]">
-                <th className="text-left pb-2">Time</th>
-                <th className="text-left pb-2">Action</th>
-                <th className="text-left pb-2">Ticker</th>
-                <th className="text-right pb-2">Price</th>
-                <th className="text-right pb-2">PnL</th>
-                <th className="text-right pb-2">Source</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.trades.map((t, i) => (
-                <tr
-                  key={`${t.timestamp}-${i}`}
-                  className="border-b border-[var(--border)] last:border-0"
-                >
-                  <td className="py-1.5 text-xs text-[var(--muted)] font-mono">
-                    {t.timestamp?.slice(5, 16)}
-                  </td>
-                  <td className="py-1.5">
-                    <span
-                      className={clsx(
-                        "text-xs font-mono px-1 py-0.5 rounded",
-                        t.action === "BUY"
-                          ? "bg-green-900/30 text-[var(--green)]"
-                          : "bg-red-900/30 text-[var(--red)]"
-                      )}
+      {/* Expandable body */}
+      {isOpen && (
+        <div className="mt-3 border-t border-[var(--border)] pt-3">
+          {data.trades.length === 0 ? (
+            <p className="text-sm text-[var(--muted)]">
+              No trades executed yet
+            </p>
+          ) : (
+            <div className="space-y-1">
+              {data.trades.map((t, i) => {
+                const pnl = Number(t.pnl_pct) * 100;
+                const isExpanded = expandedRow === i;
+                const isSell = t.action === "SELL";
+                const entryPx = t.entry_price ? Number(t.entry_price) : null;
+                const exitPx = Number(t.price);
+
+                return (
+                  <div key={`${t.timestamp}-${i}`}>
+                    <button
+                      onClick={() =>
+                        setExpandedRow(isExpanded ? null : i)
+                      }
+                      className="w-full flex items-center gap-3 py-2 px-2 rounded-lg hover:bg-[var(--border)]/30 transition-colors text-left"
                     >
-                      {t.action}
-                    </span>
-                  </td>
-                  <td className="py-1.5 font-mono text-xs">{t.ticker}</td>
-                  <td className="py-1.5 text-right font-mono text-xs">
-                    ${Number(t.price).toLocaleString()}
-                  </td>
-                  <td
-                    className={clsx(
-                      "py-1.5 text-right font-mono text-xs",
-                      Number(t.pnl_pct) > 0
-                        ? "text-[var(--green)]"
-                        : Number(t.pnl_pct) < 0
-                        ? "text-[var(--red)]"
-                        : "text-[var(--muted)]"
+                      {/* Action badge */}
+                      <span
+                        className={clsx(
+                          "text-[10px] font-mono font-bold px-1.5 py-0.5 rounded w-10 text-center shrink-0",
+                          t.action === "BUY" &&
+                            "bg-green-900/30 text-[var(--green)]",
+                          t.action === "SELL" &&
+                            "bg-red-900/30 text-[var(--red)]",
+                          t.action === "ADD" &&
+                            "bg-blue-900/30 text-[var(--blue)]"
+                        )}
+                      >
+                        {t.action}
+                      </span>
+
+                      {/* Ticker */}
+                      <span className="text-xs font-mono w-16 shrink-0">
+                        {t.ticker?.replace("/USDT", "").replace(":USDT", "")}
+                      </span>
+
+                      {/* Price — SELL shows entry→exit, BUY shows entry */}
+                      {isSell && entryPx ? (
+                        <span className="text-xs font-mono text-[var(--muted)] w-44 shrink-0 flex items-center gap-1">
+                          <span className="text-[var(--green)]">{fmt$(entryPx)}</span>
+                          <span className="text-[var(--muted)]">→</span>
+                          <span className="text-[var(--red)]">{fmt$(exitPx)}</span>
+                        </span>
+                      ) : (
+                        <span className="text-xs font-mono text-[var(--muted)] w-44 shrink-0">
+                          {fmt$(exitPx)}
+                        </span>
+                      )}
+
+                      {/* PnL */}
+                      <span
+                        className={clsx(
+                          "text-xs font-mono font-bold w-16 shrink-0",
+                          isSell && pnl > 0 && "text-[var(--green)]",
+                          isSell && pnl < 0 && "text-[var(--red)]",
+                          !isSell && "text-[var(--muted)]"
+                        )}
+                      >
+                        {isSell
+                          ? `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%`
+                          : "—"}
+                      </span>
+
+                      {/* Time */}
+                      <span className="text-[10px] font-mono text-[var(--muted)] flex-1 text-right">
+                        {t.timestamp?.slice(5, 16)}
+                      </span>
+
+                      {/* Expand indicator */}
+                      <span
+                        className={clsx(
+                          "text-[10px] text-[var(--muted)] transition-transform duration-200 shrink-0",
+                          isExpanded && "rotate-180"
+                        )}
+                      >
+                        ▾
+                      </span>
+                    </button>
+
+                    {/* Expanded details */}
+                    {isExpanded && (
+                      <div className="ml-12 mr-4 mb-2 px-3 py-2 rounded-lg bg-[var(--border)]/20 border border-[var(--border)]/50 text-xs space-y-2">
+                        {/* Price detail for SELL */}
+                        {isSell && entryPx && (
+                          <div className="flex items-center gap-4 py-1 border-b border-[var(--border)]/30">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[var(--muted)]">Entry:</span>
+                              <span className="font-mono font-bold text-[var(--text)]">{fmt$(entryPx)}</span>
+                            </div>
+                            <span className="text-[var(--muted)]">→</span>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[var(--muted)]">Exit:</span>
+                              <span className="font-mono font-bold text-[var(--text)]">{fmt$(exitPx)}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[var(--muted)]">P&L:</span>
+                              <span
+                                className={clsx(
+                                  "font-mono font-bold",
+                                  pnl >= 0 ? "text-[var(--green)]" : "text-[var(--red)]"
+                                )}
+                              >
+                                {pnl >= 0 ? "+" : ""}
+                                {pnl.toFixed(2)}% (${((exitPx - entryPx) * Number(t.qty)).toFixed(2)})
+                              </span>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* BUY entry info */}
+                        {!isSell && (
+                          <div className="flex items-center gap-4 py-1 border-b border-[var(--border)]/30">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[var(--muted)]">Entry Price:</span>
+                              <span className="font-mono font-bold text-[var(--text)]">{fmt$(exitPx)}</span>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Reason */}
+                        {t.reason && (
+                          <p className="text-[var(--text)] leading-relaxed">
+                            {t.reason}
+                          </p>
+                        )}
+
+                        {/* Meta */}
+                        <div className="flex flex-wrap gap-3 text-[var(--muted)] pt-1">
+                          <span>
+                            Qty: {Number(t.qty).toFixed(4)}
+                          </span>
+                          <span>
+                            Value: $
+                            {Number(t.value_usd).toLocaleString(undefined, {
+                              maximumFractionDigits: 0,
+                            })}
+                          </span>
+                          {t.held_hours > 0 && (
+                            <span>
+                              Held:{" "}
+                              {t.held_hours < 1
+                                ? `${(t.held_hours * 60).toFixed(0)}min`
+                                : `${t.held_hours.toFixed(1)}h`}
+                            </span>
+                          )}
+                          <span>Regime: {t.regime}</span>
+                          <span>Source: {t.source}</span>
+                          {t.confidence > 0 && (
+                            <span>Conf: {(t.confidence * 100).toFixed(0)}%</span>
+                          )}
+                        </div>
+                      </div>
                     )}
-                  >
-                    {t.action === "SELL"
-                      ? `${(Number(t.pnl_pct) * 100).toFixed(2)}%`
-                      : "-"}
-                  </td>
-                  <td className="py-1.5 text-right text-xs text-[var(--muted)]">
-                    {t.source}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
     </div>

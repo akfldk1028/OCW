@@ -56,7 +56,7 @@ class DerivativesMonitor:
         # State
         self._running = False
         self._current_interval = poll_base
-        self._last_oi: Dict[str, float] = {}
+        self._last_oi: Dict[str, Any] = {}
         self._last_funding: Dict[str, float] = {}
         self._last_taker: Dict[str, Dict[str, Any]] = {}
         self._last_ls_ratio: Dict[str, Dict[str, Any]] = {}
@@ -120,7 +120,7 @@ class DerivativesMonitor:
                         self._broker._detect_ip_ban(exc)
                     logger.warning("[deriv] IP ban detected during poll — stopping cycle")
                     return
-                raise
+                logger.warning("[deriv] Poll failed for %s: %s — continuing to next ticker", ticker, exc)
         await self._check_stablecoin_supply()
 
     async def _check_funding(self, ticker: str) -> None:
@@ -159,14 +159,22 @@ class DerivativesMonitor:
             oi = float(oi)
 
             prev_oi = self._last_oi.get(ticker)
-            self._last_oi[ticker] = oi
+            prev_val = prev_oi if isinstance(prev_oi, (int, float)) else (
+                prev_oi.get("value", 0) if isinstance(prev_oi, dict) else 0)
+            oi_change = ((oi - prev_val) / prev_val) if prev_val > 0 else 0
+            self._last_oi[ticker] = {
+                "value": oi,
+                "change_pct": round(oi_change, 4),
+                "direction": "increasing" if oi_change > 0.01 else (
+                    "decreasing" if oi_change < -0.01 else "stable"),
+            }
 
-            if prev_oi is None or prev_oi <= 0:
+            if prev_val is None or prev_val <= 0:
                 return
 
-            change_pct = abs(oi - prev_oi) / prev_oi
+            change_pct = abs(oi_change)
             if change_pct > self._oi_spike_threshold:
-                direction = "increasing" if oi > prev_oi else "decreasing"
+                direction = "increasing" if oi > prev_val else "decreasing"
                 logger.info(
                     "[deriv] OI spike: %s %.1f%% (%s)",
                     ticker, change_pct * 100, direction,
@@ -175,7 +183,7 @@ class DerivativesMonitor:
                 await self._event_bus.publish("market.oi_spike", {
                     "ticker": ticker,
                     "open_interest": oi,
-                    "previous_oi": prev_oi,
+                    "previous_oi": prev_val,
                     "change_pct": change_pct,
                     "direction": direction,
                     "timestamp": time.time(),

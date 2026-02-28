@@ -40,6 +40,13 @@ export interface StatusData {
   timestamp: number;
 }
 
+export interface WakeCondition {
+  metric: string;
+  operator: string;
+  threshold: number;
+  reason: string;
+}
+
 export interface Decision {
   timestamp: string;
   trigger: string;
@@ -50,7 +57,7 @@ export interface Decision {
   positions: string[];
   claude_assessment?: string;
   next_check_s?: number;
-  wake_conditions?: string[];
+  wake_conditions?: (WakeCondition | string)[];
   memory?: string;
   trades?: {
     action: string;
@@ -75,6 +82,7 @@ export interface Trade {
   source: string;
   confidence: number;
   dry_run: string;
+  entry_price?: number; // attached to SELL trades (paired from matching BUY)
 }
 
 export interface TradeSummary {
@@ -93,4 +101,28 @@ export interface TSWeights {
   cumulative_pnl_pct: number;
   recent_trades: unknown[];
   global_agents: Record<string, { alpha: number; beta: number; mean: number }>;
+}
+
+export interface Candle {
+  time: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface PriceHistory {
+  ticker: string;
+  timeframe: string;
+  candles: Candle[];
+}
+
+export interface EquityPoint {
+  time: string;
+  value: number;
+}
+
+export interface EquityCurve {
+  points: EquityPoint[];
 }

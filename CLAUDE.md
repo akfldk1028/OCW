@@ -21,10 +21,19 @@ Monorepo: `openclaw/` 안에 trading engine이 있음.
 - **Python 3.11**: venv 사용, `pip install -r binance/requirements.txt`
 - `.env` 파일 절대 커밋 금지 (`.gitignore`에 이미 차단됨)
 
-## Current State (2026-02-25)
-- 0 live trades, cash holding, testnet validated
-- Fly.io 배포됨 (서브시스템 작동, Claude Agent만 API key 필요)
+## Current State (2026-02-28)
+- Testnet validated, 63+ trades recorded
+- Fly.io 배포됨 (서브시스템 작동)
 - Dashboard API 구현 완료, Vercel 미배포
+
+## H-TS Architecture (Hierarchical Thompson Sampling)
+3-level Bayesian RL, 레짐별 독립 학습:
+- **Level 0**: Meta-parameters (6 params × regime) — "어떻게 트레이딩?" (position_scale, entry_selectivity, hold_patience, trade_frequency, trend_vs_reversion, risk_aversion)
+- **Level 1**: Group Betas (6 groups × regime) — "어떤 분석 그룹이 유효?"
+- **Level 2**: Signal Betas (28 signals × regime) — "어떤 지표가 유효?"
+- **Fallback**: 레짐 트레이드 < 10 → _GLOBAL_ 사용
+- **State**: `binance/models/online_learner.json` (v4)
+- **Key files**: `core/online_learner.py`, `core/claude_agent.py`, `binance/runner.py`
 
 ## When Editing Trading Engine
 - Working directory: `openclaw/extensions/trading-engine/python/`

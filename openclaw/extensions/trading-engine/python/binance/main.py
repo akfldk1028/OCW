@@ -60,8 +60,14 @@ def main() -> None:
     parser.add_argument("--daily", action="store_true", help="Use daily bars instead of 4h swing")
     args = parser.parse_args()
 
-    # Load .env from binance/ dir
-    env_path = Path(__file__).resolve().parent / ".env"
+    # Load .env from binance/ dir (.env.live for --live, .env for testnet)
+    env_dir = Path(__file__).resolve().parent
+    if args.live:
+        env_path = env_dir / ".env.live"
+        if not env_path.exists():
+            env_path = env_dir / ".env"
+    else:
+        env_path = env_dir / ".env"
     load_dotenv(env_path)
 
     # Override env based on args

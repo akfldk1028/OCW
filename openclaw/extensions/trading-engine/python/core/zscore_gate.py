@@ -23,46 +23,66 @@ logger = logging.getLogger("trading-engine.gate")
 
 
 class ZScoreTracker:
-    """Rolling z-score for a single feature."""
+    """Rolling z-score using Welford's online algorithm.
+
+    Welford avoids catastrophic floating-point cancellation that occurs
+    with sum-of-squares on large values (e.g. BTC $90K+).
+    """
 
     def __init__(self, window: int = 50) -> None:
         self._window = window
         self._values: deque = deque(maxlen=window)
-        self._sum: float = 0.0
-        self._sum_sq: float = 0.0
+        self._mean: float = 0.0
+        self._M2: float = 0.0  # sum of squared deviations from mean
+        self._n: int = 0
 
     def update(self, value: float) -> Optional[float]:
         """Add value, return z-score (None if < 3 samples)."""
+        # Remove oldest if at capacity (reverse Welford step)
         if len(self._values) == self._window:
             old = self._values[0]
-            self._sum -= old
-            self._sum_sq -= old * old
-        self._values.append(value)
-        self._sum += value
-        self._sum_sq += value * value
+            self._n -= 1
+            if self._n > 0:
+                old_mean = self._mean
+                self._mean = (old_mean * (self._n + 1) - old) / self._n
+                self._M2 -= (old - old_mean) * (old - self._mean)
+            else:
+                self._mean = 0.0
+                self._M2 = 0.0
 
-        n = len(self._values)
-        if n < 3:
+        self._values.append(value)
+        # Welford update
+        self._n += 1
+        delta = value - self._mean
+        self._mean += delta / self._n
+        delta2 = value - self._mean
+        self._M2 += delta * delta2
+
+        if self._n < 3:
             return None
 
-        mean = self._sum / n
-        var = self._sum_sq / n - mean * mean
+        var = self._M2 / self._n if self._n > 1 else 0.0
         if var <= 0:
             return 0.0
-        return (value - mean) / sqrt(var)
+        return (value - self._mean) / sqrt(var)
 
 
 @dataclass
 class WakeCondition:
-    """A condition Claude sets to be woken up early."""
+    """A condition Claude sets to be woken up early.
+
+    Once triggered, the condition is marked and will not fire again.
+    Claude must send new wake_conditions to re-arm.
+    """
 
     metric: str         # e.g. "btc_price", "funding_rate"
     operator: str       # gt, lt, crosses_above, crosses_below, abs_change_pct_gt
     threshold: float
     reason: str = ""
+    triggered: bool = False  # marked True after first fire — prevents spam
 
     def evaluate(self, current: Optional[float], previous: Optional[float]) -> bool:
-        if current is None:
+        if self.triggered or current is None:
             return False
 
         if self.operator == "gt":
@@ -106,10 +126,8 @@ class AdaptiveGate:
         self._next_check_at: float = time.time() + max_check_seconds
         self._wake_conditions: List[WakeCondition] = []
 
-        # Cooldown
+        # Cooldown (only rate-limiter — z-score extreme moves always get through)
         self._last_wake_time: float = 0.0
-        # Post-decision cooldown: after Claude decides, block z-score triggers for a period
-        self._post_decision_until: float = 0.0
 
         # Previous feature values (for crosses_above/below)
         self._prev_features: Dict[str, float] = {}
@@ -126,12 +144,10 @@ class AdaptiveGate:
         # Cooldown check — overrides everything except candle close
         in_cooldown = (now - self._last_wake_time) < self._min_check_seconds
 
-        # Gate 1: Candle close — must also respect Claude's timer
-        # Claude sets next_check_seconds; candle_close should NOT override it.
-        # Only pass if Claude's timer has expired or no timer is set.
+        # Gate 1: Candle close — only respect cooldown, not Claude's timer
+        # Candle close is a structural event; Claude should see it even if timer is active
         if is_candle_close:
-            timer_active = self._next_check_at > 0 and now < self._next_check_at
-            if in_cooldown or timer_active:
+            if in_cooldown:
                 self._update_prev(features)
                 return False, []
             reasons.append("candle_close")
@@ -139,35 +155,33 @@ class AdaptiveGate:
             self._update_prev(features)
             return True, reasons
 
-        if in_cooldown:
-            self._update_prev(features)
-            return False, []
+        # Non-z-score gates respect cooldown
+        if not in_cooldown:
+            # Gate 2: Timer expired (routine check)
+            if self._next_check_at > 0 and now >= self._next_check_at:
+                reasons.append("timer_expired")
 
-        # Post-decision cooldown: only wake_conditions and timer can override,
-        # z-score outliers are blocked until Claude's requested interval elapses
-        in_post_decision = now < self._post_decision_until
-
-        # Gate 2: Timer expired
-        if self._next_check_at > 0 and now >= self._next_check_at:
-            reasons.append("timer_expired")
-
-        # Gate 3: Z-score outliers — blocked during post-decision cooldown
+        # Gate 3: Z-score outliers — ALWAYS active, only respects cooldown
+        # Extreme market moves must trigger immediately regardless of Claude's timer
         for name, value in features.items():
             tracker = self._trackers.get(name)
             if tracker is None:
                 tracker = ZScoreTracker(window=self._zscore_window)
                 self._trackers[name] = tracker
             z = tracker.update(value)
-            if not in_post_decision and z is not None and abs(z) >= self._zscore_threshold:
-                reasons.append(f"zscore:{name}={z:+.2f}")
+            if z is not None and abs(z) >= self._zscore_threshold:
+                if not in_cooldown:
+                    reasons.append(f"zscore:{name}={z:+.2f}")
 
-        # Gate 4: Claude's wake conditions (always active — these are Claude's own triggers)
-        for cond in self._wake_conditions:
-            current = features.get(cond.metric)
-            previous = self._prev_features.get(cond.metric)
-            if cond.evaluate(current, previous):
-                label = cond.reason or f"{cond.metric} {cond.operator} {cond.threshold}"
-                reasons.append(f"wake_cond:{label}")
+        # Gate 4: Claude's wake conditions (respect cooldown, single-fire)
+        if not in_cooldown:
+            for cond in self._wake_conditions:
+                current = features.get(cond.metric)
+                previous = self._prev_features.get(cond.metric)
+                if cond.evaluate(current, previous):
+                    cond.triggered = True  # single-fire: won't re-evaluate
+                    label = cond.reason or f"{cond.metric} {cond.operator} {cond.threshold}"
+                    reasons.append(f"wake_cond:{label}")
 
         self._update_prev(features)
 
@@ -192,12 +206,11 @@ class AdaptiveGate:
                 min(next_check_seconds, self._max_check_seconds),
             )
             self._next_check_at = now + clamped
-            # Block z-score triggers for half the requested interval (min 120s, max 600s)
-            # Wake conditions still fire — they are Claude's own stop/scale-in triggers
-            self._post_decision_until = now + max(120.0, min(clamped * 0.5, 600.0))
             self._last_wake_time = now
-            logger.info("[gate] Next check in %.0fs (z-score blocked for %.0fs)",
-                        clamped, self._post_decision_until - now)
+            # z-score is NEVER blocked — extreme moves always trigger
+            # Only the 60s cooldown rate-limits calls
+            logger.info("[gate] Next routine check in %.0fs (z-score always active, cooldown=%.0fs)",
+                        clamped, self._min_check_seconds)
 
         if wake_conditions is not None:
             self._wake_conditions = []
@@ -219,7 +232,7 @@ class AdaptiveGate:
         now = time.time()
         return {
             "next_check_in": max(0, self._next_check_at - now) if self._next_check_at > 0 else None,
-            "zscore_blocked_for": max(0, self._post_decision_until - now),
+            "zscore_always_active": True,
             "wake_conditions": len(self._wake_conditions),
             "tracked_features": list(self._trackers.keys()),
             "cooldown_remaining": max(0, self._min_check_seconds - (now - self._last_wake_time)),

@@ -113,13 +113,26 @@ CRYPTO_PAIRS = [
 ]
 
 CRYPTO_RISK_CONFIG = {
-    "take_profit_pct": 0.06,       # 6% TP (higher vol than equities)
-    "stop_loss_pct": -0.05,        # -5% hard SL (was -10%, too wide for swing)
+    # === CATASTROPHIC SAFETY ONLY — agent decides normal exits via RL ===
+    "stop_loss_pct": -0.05,        # -5% catastrophic SL — flash crash protection ONLY (agent cuts before this)
+    "take_profit_pct": 0.05,       # +5% catastrophic TP — agent takes profit before this
     "max_position_pct": 0.15,      # 15% max single position
     "max_exposure_pct": 0.60,      # 60% max total (crypto is riskier)
     "kelly_fraction": 0.15,        # conservative Kelly for crypto
-    "trailing_stop_atr_multiplier": 2.5,
-    "max_hold_hours": 48,          # time stop: 48h max for swing trades
+    "trailing_stop_atr_multiplier": 2.5,  # wide trail — only catches big runners
+    "max_hold_hours": 4.0,         # 4h max — agent should exit well before this
+    "min_confidence": 0.60,        # reject low-conviction trades (adaptive override in runner)
+    # Scalp trailing — wide enough that agent makes the call, not safety
+    "scalp_trail_activation_pct": 0.02,   # +2% peak → activate (agent trails tighter)
+    "scalp_trail_width_pct": 0.01,        # 1% width (agent locks profit earlier)
+    # Profit protection — disabled (agent learns when to protect profits)
+    "profit_protect_peak_pct": 0.03,      # +3% peak (effectively disabled for scalps)
+    "profit_protect_floor_pct": 0.01,     # +1% floor (agent protects earlier)
+    # DCA (ADD) mode
+    "dca_stop_loss_pct": -0.05,           # -5% catastrophic (same as base)
+    "dca_max_hold_hours": 4.0,            # 4h max
+    "dca_trail_activation_pct": 0.03,     # +3% peak
+    "dca_trail_width_pct": 0.015,         # 1.5% width
 }
 
 # Regime Blend config — validated via backtest_v2.py (daily bars)

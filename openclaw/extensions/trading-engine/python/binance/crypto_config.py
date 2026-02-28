@@ -26,20 +26,24 @@ for d in [DATA_DIR, LOGS_DIR, MODELS_DIR]:
 # Event-driven config (replaces fixed cron intervals)
 EVENT_CONFIG = {
     "significant_move_pct": 0.015,      # BTC >1.5% move triggers re-evaluation
-    "kline_intervals": ["15m", "1h", "4h"],  # multi-TF WS subscription
-    "primary_interval": "15m",          # gate trigger interval (most frequent)
+    "kline_intervals": ["1m", "5m", "15m", "1h"],  # fast TF + 1h for WS updates
+    "primary_interval": "1m",           # 1m candle = fastest gate trigger
     "derivatives_poll_base": 300,       # 5 min base polling for funding/OI
     "derivatives_poll_fast": 60,        # 1 min accelerated when extreme
     "funding_extreme_threshold": 0.0005,  # 0.05%/8h funding rate
     "oi_spike_threshold": 0.10,         # 10% OI change
-    "min_decision_gap": 300,            # 5 min cooldown between decisions (was 2min, too frequent)
+    "min_decision_gap": 60,             # 1 min cooldown (only rate limiter)
     # Adaptive gate (Phase 1: agent-autonomous scheduling)
     "gate": {
-        "zscore_threshold": 2.5,        # restored (2.0 was too sensitive — 81 calls/90min)
+        "zscore_threshold": 1.5,        # testing — observe trigger frequency
         "zscore_window": 50,
-        "max_check_seconds": 3600,      # 1h fallback ceiling (was 4h)
+        "max_check_seconds": 3600,      # 1h fallback ceiling — agent schedules within this
     },
 }
+
+# Trading fees (Binance spot default: 0.1% per side)
+FEE_RATE = float(os.environ.get("FEE_RATE", "0.001"))  # 0.1% per trade
+ROUND_TRIP_FEE = FEE_RATE * 2  # 0.2% buy+sell
 
 # Logging
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")

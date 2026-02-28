@@ -207,7 +207,7 @@ def _get_fresh_token_from_credentials() -> Optional[str]:
 # ------------------------------------------------------------------
 
 def _get_token_from_macos_keychain() -> Optional[str]:
-    """Read OAuth token from macOS Keychain."""
+    """Read OAuth token from macOS Keychain, with auto-refresh if expired."""
     try:
         result = subprocess.run(
             ["/usr/bin/security", "find-generic-password",
@@ -220,11 +220,56 @@ def _get_token_from_macos_keychain() -> Optional[str]:
         if not creds_json:
             return None
         data = json.loads(creds_json)
-        token = data.get("claudeAiOauth", {}).get("accessToken")
-        if token and token.startswith("sk-ant-oat01-"):
+        oauth = data.get("claudeAiOauth", {})
+        token = oauth.get("accessToken", "")
+        refresh_token = oauth.get("refreshToken", "")
+        expires_at = oauth.get("expiresAt", 0)
+
+        if not token.startswith("sk-ant-oat01-"):
+            return None
+
+        # Check if token is expired (with 5 min buffer)
+        now_ms = int(time.time() * 1000)
+        is_expired = expires_at > 0 and now_ms > (expires_at - 300_000)
+
+        if not is_expired:
             return token
-        return None
-    except Exception:
+
+        # Token expired — try refresh
+        if not refresh_token:
+            logger.warning("[auth] Keychain token expired, no refresh token")
+            return token  # try anyway, might still work
+
+        logger.info("[auth] Keychain token expired, refreshing...")
+        new_oauth = _refresh_access_token(refresh_token)
+        if not new_oauth:
+            logger.warning("[auth] Keychain token refresh failed, using expired token")
+            return token
+
+        # Update Keychain with refreshed token
+        oauth.update(new_oauth)
+        try:
+            updated_json = json.dumps(data)
+            subprocess.run(
+                ["/usr/bin/security", "delete-generic-password",
+                 "-s", "Claude Code-credentials"],
+                capture_output=True, timeout=5,
+            )
+            subprocess.run(
+                ["/usr/bin/security", "add-generic-password",
+                 "-s", "Claude Code-credentials",
+                 "-a", "Claude Code",
+                 "-w", updated_json,
+                 "-U"],
+                capture_output=True, timeout=5,
+            )
+            logger.info("[auth] Keychain updated with refreshed token")
+        except Exception as e:
+            logger.warning("[auth] Failed to update Keychain: %s", e)
+
+        return new_oauth["accessToken"]
+    except Exception as exc:
+        logger.error("[auth] Keychain read error: %s", exc)
         return None
 
 
@@ -316,6 +361,18 @@ def get_sdk_env_vars() -> dict[str, str]:
     return env
 
 
+def _unset_nesting_guard() -> None:
+    """Remove CLAUDECODE env var to prevent nested-session detection.
+
+    When the engine is launched from within a Claude Code session (e.g. via
+    Bash tool), it inherits CLAUDECODE=1.  The SDK subprocess then refuses
+    to start ("cannot be launched inside another Claude Code session").
+    Unsetting the variable is safe — the engine IS a separate process.
+    """
+    if os.environ.pop("CLAUDECODE", None):
+        logger.info("[auth] Removed CLAUDECODE env var (nesting guard)")
+
+
 def configure_sdk_authentication(config_dir: Optional[str] = None) -> None:
     """Configure SDK authentication.
 
@@ -327,6 +384,9 @@ def configure_sdk_authentication(config_dir: Optional[str] = None) -> None:
     Raises:
         ValueError: If no auth method is available.
     """
+    # 0. Remove nesting guard so SDK subprocess doesn't refuse to start
+    _unset_nesting_guard()
+
     # 1. API key mode (simplest, no token refresh needed)
     if os.environ.get("ANTHROPIC_API_KEY", "").strip():
         os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)

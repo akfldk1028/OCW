@@ -5,6 +5,6 @@ from core.pipeline import (
 )
 from core.position_tracker import PositionTracker
 from core.agent_evaluator import evaluate_position, build_market_context
-from core.online_learner import OnlineLearner
+from core.online_learner import OnlineLearner, HierarchicalOnlineLearner
 from core.risk_manager import RiskManager
 from core.ws_stream import TradingStream

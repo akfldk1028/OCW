@@ -126,6 +126,32 @@ class OHLCVStore:
         """Return latest volume per ticker from last get_close_df() call."""
         return getattr(self, "_last_volumes", {})
 
+    def get_bars(
+        self,
+        ticker: str,
+        interval: str,
+        n: int = 0,
+    ) -> List[tuple]:
+        """Return raw OHLCV tuples: [(timestamp_ms, o, h, l, c, v), ...].
+
+        Args:
+            ticker: e.g. "BTC/USDT"
+            interval: e.g. "1m"
+            n: number of most recent bars (0 = all)
+
+        Returns:
+            List of (timestamp_ms, open, high, low, close, volume) tuples.
+        """
+        key = (ticker, interval)
+        with self._lock:
+            q = self._bars.get(key)
+            if not q:
+                return []
+            bars = list(q)
+        if n > 0:
+            bars = bars[-n:]
+        return bars
+
     def bar_count(self, ticker: str, interval: str) -> int:
         key = (ticker, interval)
         with self._lock:

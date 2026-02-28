@@ -35,6 +35,7 @@ REGIME_LABELS = {
     0: "low_volatility",
     1: "medium_volatility",
     2: "high_volatility",
+    3: "extreme_volatility",
 }
 # BIC search range for optimal state count (arXiv:2602.03874 recommends 3+)
 _BIC_SEARCH_RANGE = [2, 3, 4]
@@ -59,6 +60,8 @@ class CryptoRegimeDetector:
         self._last_fit_date: Optional[str] = None
         self._regime_history: List[int] = []
         self._cached_features: Optional[pd.DataFrame] = None
+        self._features_cache_time: float = 0.0
+        self._features_cache_ttl: float = 3600.0  # 1 hour (daily data doesn't change often)
 
     def detect(self, force_refit: bool = False) -> Dict[str, Any]:
         """Detect crypto market regime via BTC volatility HMM.
@@ -151,7 +154,12 @@ class CryptoRegimeDetector:
     # ------------------------------------------------------------------
 
     def _prepare_features(self) -> Optional[pd.DataFrame]:
-        """Download BTC data and compute HMM input features."""
+        """Download BTC data and compute HMM input features (cached for 1 hour)."""
+        import time as _time
+        now = _time.time()
+        if self._cached_features is not None and (now - self._features_cache_time) < self._features_cache_ttl:
+            return self._cached_features
+
         end_date = datetime.now()
         start_date = end_date - timedelta(days=int(self.lookback_days * 1.5))
 
@@ -195,6 +203,7 @@ class CryptoRegimeDetector:
             features = features.iloc[-self.lookback_days:]
 
         self._cached_features = features
+        self._features_cache_time = now
         return features
 
     def _fit_hmm(self, features_df: pd.DataFrame, force_refit: bool = False):

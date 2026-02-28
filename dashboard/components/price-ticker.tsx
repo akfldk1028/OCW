@@ -1,36 +1,85 @@
 "use client";
 
-import { useStatus } from "@/lib/hooks";
+import { useEffect, useRef, useState } from "react";
+
+const SYMBOLS = [
+  { label: "BTC", symbol: "btcusdt" },
+  { label: "ETH", symbol: "ethusdt" },
+  { label: "SOL", symbol: "solusdt" },
+  { label: "PAXG", symbol: "paxgusdt" },
+];
+
+interface TickerPrice {
+  price: number;
+  prevPrice: number;
+}
 
 export default function PriceTicker() {
-  const { data, isLoading } = useStatus();
+  const [prices, setPrices] = useState<Record<string, TickerPrice>>({});
+  const wsRef = useRef<WebSocket | null>(null);
 
-  if (isLoading) return <div className="card animate-pulse h-16" />;
-  if (!data) return null;
+  useEffect(() => {
+    const streams = SYMBOLS.map((s) => `${s.symbol}@miniTicker`).join("/");
+    const ws = new WebSocket(
+      `wss://stream.binance.com:9443/stream?streams=${streams}`
+    );
 
-  const prices = Object.entries(data.tick_prices);
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      const data = msg.data;
+      if (!data || !data.s) return;
+
+      const symbol = data.s.toLowerCase();
+      const newPrice = parseFloat(data.c); // close price
+
+      setPrices((prev) => ({
+        ...prev,
+        [symbol]: {
+          price: newPrice,
+          prevPrice: prev[symbol]?.price ?? newPrice,
+        },
+      }));
+    };
+
+    wsRef.current = ws;
+
+    return () => {
+      ws.close();
+    };
+  }, []);
 
   return (
-    <div className="card">
-      <h2 className="text-sm font-medium text-[var(--muted)] mb-3">
-        Live Prices
-      </h2>
-      <div className="flex gap-6">
-        {prices.map(([ticker, price]) => (
-          <div key={ticker}>
-            <p className="text-xs text-[var(--muted)]">{ticker}</p>
-            <p className="text-lg font-mono font-bold">
-              ${price.toLocaleString(undefined, {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2,
-              })}
-            </p>
+    <div className="flex items-center gap-4">
+      {SYMBOLS.map((s) => {
+        const tick = prices[s.symbol];
+        const price = tick?.price ?? 0;
+        const isUp = tick ? tick.price >= tick.prevPrice : true;
+
+        return (
+          <div key={s.symbol} className="flex items-center gap-1.5">
+            <span className="text-xs text-[var(--muted)] font-mono">
+              {s.label}
+            </span>
+            <span
+              className={`text-sm font-mono font-bold transition-colors duration-300 ${
+                !tick
+                  ? "text-[var(--text)]"
+                  : isUp
+                  ? "text-[var(--green)]"
+                  : "text-[var(--red)]"
+              }`}
+            >
+              {price > 0
+                ? `$${price.toLocaleString(undefined, {
+                    minimumFractionDigits: 0,
+                    maximumFractionDigits: price < 10 ? 4 : 0,
+                  })}`
+                : "..."}
+            </span>
           </div>
-        ))}
-        {prices.length === 0 && (
-          <p className="text-sm text-[var(--muted)]">Waiting for WS data...</p>
-        )}
-      </div>
+        );
+      })}
+      <span className="w-1.5 h-1.5 rounded-full bg-[var(--green)] pulse-dot" />
     </div>
   );
 }

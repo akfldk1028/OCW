@@ -62,7 +62,7 @@ class EventBus:
             print(event.payload)
         bus.subscribe("market.regime", on_regime)
 
-        # Publish (fire-and-forget)
+        # Publish (fire-and-forget — does NOT block caller)
         await bus.publish("market.regime", {"state": "low_vol"})
 
         # Request/reply with timeout
@@ -73,6 +73,7 @@ class EventBus:
         self._handlers: Dict[str, List[Handler]] = defaultdict(list)
         self._reply_futures: Dict[str, asyncio.Future] = {}
         self._event_log: deque = deque(maxlen=500)
+        self._background_tasks: set = set()  # prevent GC of fire-and-forget tasks
 
     def subscribe(self, topic: str, handler: Handler) -> None:
         """Register *handler* for events on *topic*."""
@@ -85,8 +86,14 @@ class EventBus:
         if handler in handlers:
             handlers.remove(handler)
 
-    async def publish(self, topic: str, payload: Dict[str, Any]) -> Event:
-        """Publish an event to all subscribers.  Non-blocking."""
+    async def publish(self, topic: str, payload: Dict[str, Any], *, await_handlers: bool = False) -> Event:
+        """Publish an event to all subscribers.
+
+        By default, handlers run as background tasks (fire-and-forget) so the
+        caller (e.g. WS receive loop) is NOT blocked by slow handlers like Claude.
+
+        Set await_handlers=True to wait for all handlers to complete (used by request/reply).
+        """
         event = Event(topic=topic, payload=payload)
         self._record(event)
 
@@ -97,8 +104,15 @@ class EventBus:
 
         # Fire all handlers concurrently
         tasks = [asyncio.create_task(self._safe_call(h, event)) for h in handlers]
-        if tasks:
+
+        if await_handlers:
+            # Blocking mode — used by request/reply pattern
             await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            # Fire-and-forget — prevent GC by tracking tasks
+            for t in tasks:
+                self._background_tasks.add(t)
+                t.add_done_callback(self._background_tasks.discard)
 
         # Resolve any pending request/reply futures
         reply_key = f"reply:{topic}:{event.event_id}"
@@ -125,7 +139,7 @@ class EventBus:
 
         self.subscribe(reply_topic, _capture_reply)
         try:
-            await self.publish(topic, payload)
+            await self.publish(topic, payload, await_handlers=True)
             result = await asyncio.wait_for(future, timeout=timeout)
             return result
         except asyncio.TimeoutError:
@@ -140,7 +154,8 @@ class EventBus:
 
     def get_recent_events(self, n: int = 20) -> List[Dict[str, Any]]:
         """Return the last *n* events as dicts."""
-        return [e.to_dict() for e in self._event_log[-n:]]
+        events = list(self._event_log)
+        return [e.to_dict() for e in events[-n:]]
 
     @property
     def topics(self) -> List[str]:

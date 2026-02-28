@@ -26,7 +26,7 @@ class Bar:
 class MultiTFAggregator:
     """Aggregate candle data across multiple timeframes."""
 
-    def __init__(self, intervals: Tuple[str, ...] = ("15m", "1h", "4h"), maxlen: int = 20):
+    def __init__(self, intervals: Tuple[str, ...] = ("15m", "1h", "4h"), maxlen: int = 50):
         self._intervals = intervals
         self._maxlen = maxlen
         # {ticker: {interval: deque[Bar]}}
@@ -67,13 +67,15 @@ class MultiTFAggregator:
         """Return summaries for all tickers."""
         return {ticker: self.get_summary(ticker) for ticker in self._candles}
 
-    def format_for_prompt(self, ticker: str) -> str:
+    def format_for_prompt(self, ticker: str, skip_intervals: tuple = ("1m",)) -> str:
         """Format multi-TF summary as human-readable text for Claude."""
         summary = self.get_summary(ticker)
         if not summary:
             return ""
         lines = []
         for interval in self._intervals:
+            if interval in skip_intervals:
+                continue
             s = summary.get(interval, {})
             if s.get("status") == "no data":
                 lines.append(f"  {interval}: no data yet")

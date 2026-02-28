@@ -48,6 +48,9 @@ class TrackedPosition:
     entry_regime: str = "unknown"
     entry_momentum_z: float = 0.0
 
+    # Position type: scalp (BUY only) vs DCA (after ADD)
+    is_dca: bool = False              # True after ADD executes → wider SL/hold
+
     # Agent evaluation state (updated by agent loop)
     agent_verdict: str = "HOLD"       # HOLD / EXIT / ADD
     agent_confidence: float = 0.0
@@ -56,9 +59,12 @@ class TrackedPosition:
 
     @property
     def pnl_pct(self) -> float:
+        """Net PnL after round-trip fees (buy + sell)."""
         if self.entry_price <= 0 or self.current_price <= 0:
             return 0.0
-        return (self.current_price - self.entry_price) / self.entry_price
+        from crypto_config import ROUND_TRIP_FEE
+        gross = (self.current_price - self.entry_price) / self.entry_price
+        return gross - ROUND_TRIP_FEE
 
     @property
     def market_value(self) -> float:
@@ -84,6 +90,7 @@ class TrackedPosition:
             "market_value": round(self.market_value, 2),
             "trailing_high": self.trailing_high,
             "held_hours": round(self.held_hours, 1),
+            "is_dca": self.is_dca,
             "entry_regime": self.entry_regime,
             "agent_verdict": self.agent_verdict,
             "agent_confidence": round(self.agent_confidence, 3),
@@ -322,44 +329,74 @@ class PositionTracker:
     def _check_safety_rules(self, pos: TrackedPosition) -> Optional[str]:
         """Rule-based safety checks. Returns reason string or None.
 
-        Safety layer is the last line of defense — these thresholds should be
-        wider than Claude's strategy to avoid premature exits.
+        Two modes based on position type:
+        - Scalp (BUY only): Tight SL -0.7%, trail +0.4%/0.2%, hold 45min
+        - DCA (after ADD):  Wider SL -1.5%, trail +0.8%/0.4%, hold 2h
+          DCA needs room for the averaging-down thesis to play out.
         """
         cfg = CRYPTO_RISK_CONFIG if pos.market_type == "crypto" else RISK_CONFIG
         pnl = pos.pnl_pct
 
-        # Hard stop loss (unconditional — protects against flash crash)
-        sl = cfg.get("stop_loss_pct", -0.04)
-        if pnl <= sl:
-            return f"stop_loss ({pnl:+.1%} <= {sl:+.1%})"
+        # Select SL/trail/hold based on position type (scalp vs DCA)
+        if pos.is_dca:
+            sl = cfg.get("dca_stop_loss_pct", -0.015)
+            trail_act = cfg.get("dca_trail_activation_pct", 0.008)
+            trail_width = cfg.get("dca_trail_width_pct", 0.004)
+            max_hold = cfg.get("dca_max_hold_hours", 2.0)
+            mode = "dca"
+        else:
+            sl = cfg.get("stop_loss_pct", -0.007)
+            trail_act = cfg.get("scalp_trail_activation_pct", 0.004)
+            trail_width = cfg.get("scalp_trail_width_pct", 0.002)
+            max_hold = cfg.get("max_hold_hours", 0.75)
+            mode = "scalp"
 
-        # Trailing stop — use config trail_pct (consistent with Claude's strategy)
-        # trail_pct from ACTIVE_BLEND_CONFIG (8-12%), not atr_multiplier*0.01 (2.5%)
-        try:
-            from crypto_config import ACTIVE_BLEND_CONFIG
-            trail_pct = ACTIVE_BLEND_CONFIG.get("trail_pct", 0.12)
-            trail_activation = ACTIVE_BLEND_CONFIG.get("trail_activation_pct", 0.08)
-        except ImportError:
-            trail_pct = cfg.get("trail_pct", 0.12)
-            trail_activation = cfg.get("trail_activation_pct", 0.08)
+        # 1. Hard stop loss (unconditional — protects against flash crash)
+        if pnl <= sl:
+            return f"stop_loss_{mode} ({pnl:+.2%} <= {sl:+.2%})"
+
+        # 2. Take profit safety net (same for both modes)
+        tp = cfg.get("take_profit_pct", 0.008)
+        if pnl >= tp:
+            return f"take_profit ({pnl:+.2%} >= {tp:+.2%})"
 
         if pos.trailing_high > pos.entry_price:
             peak_pnl = (pos.trailing_high - pos.entry_price) / pos.entry_price
-            # Only activate trailing stop after sufficient profit
+
+            # 3. Trailing stop (tight for scalp, wider for DCA)
+            if peak_pnl >= trail_act:
+                trail_stop = pos.trailing_high * (1 - trail_width)
+                if pos.current_price <= trail_stop:
+                    locked_pnl = (trail_stop - pos.entry_price) / pos.entry_price
+                    return (
+                        f"{mode}_trail (peak={peak_pnl:+.2%}, "
+                        f"locked≈{locked_pnl:+.2%}, width={trail_width:.2%})"
+                    )
+
+            # 4. Swing trailing stop (wide — for rare big runners)
+            try:
+                from crypto_config import ACTIVE_BLEND_CONFIG
+                trail_pct = ACTIVE_BLEND_CONFIG.get("trail_pct", 0.06)
+                trail_activation = ACTIVE_BLEND_CONFIG.get("trail_activation_pct", 0.04)
+            except ImportError:
+                trail_pct = cfg.get("trail_pct", 0.06)
+                trail_activation = cfg.get("trail_activation_pct", 0.04)
+
             if peak_pnl >= trail_activation:
                 trail_stop = pos.trailing_high * (1 - trail_pct)
                 if pos.current_price <= trail_stop:
                     drop = (pos.current_price - pos.trailing_high) / pos.trailing_high
                     return f"trailing_stop ({drop:+.1%} from high {pos.trailing_high:.2f})"
 
-            # Profit protection: don't let +2% winners become losers
-            if peak_pnl >= 0.02 and pnl < 0.005:
-                return f"profit_protect (peak={peak_pnl:+.1%}, now={pnl:+.1%})"
+            # 5. Profit protection: don't let winners become losers
+            pp_peak = cfg.get("profit_protect_peak_pct", 0.003)
+            pp_floor = cfg.get("profit_protect_floor_pct", 0.001)
+            if peak_pnl >= pp_peak and pnl < pp_floor:
+                return f"profit_protect (peak={peak_pnl:+.2%}, now={pnl:+.2%})"
 
-        # Time stop: swing positions shouldn't overstay
-        max_hold = cfg.get("max_hold_hours", 48)
-        if pos.held_hours > max_hold and pnl < 0.01:
-            return f"time_stop (held {pos.held_hours:.0f}h, pnl={pnl:+.1%})"
+        # 6. Time stop (45min scalp / 2h DCA)
+        if pos.held_hours > max_hold:
+            return f"time_stop_{mode} (held {pos.held_hours:.1f}h > {max_hold}h, pnl={pnl:+.2%})"
 
         return None
 
@@ -406,7 +443,7 @@ class PositionTracker:
                 pos.agent_reasons = reasons
                 pos.last_agent_eval = time.time()
 
-                if verdict == "EXIT" and confidence > 0.3:
+                if verdict == "EXIT":
                     exits.append((ticker, pos, reasons))
 
                 # Publish agent evaluation event
@@ -448,7 +485,7 @@ class PositionTracker:
                 result = await result
             return float(result) if result else None
         except Exception as exc:
-            logger.debug("[tracker] Price fetch failed for %s: %s", pos.ticker, exc)
+            logger.warning("[tracker] Price fetch failed for %s: %s", pos.ticker, exc)
             return None
 
     # ------------------------------------------------------------------
@@ -459,6 +496,10 @@ class PositionTracker:
         self, pos: TrackedPosition, reason: str, source: str = "safety"
     ) -> None:
         """Execute an exit and clean up the tracked position."""
+        # Guard: position may have been exited by Claude between safety check and here
+        if pos.ticker not in self._positions:
+            logger.info("[tracker] %s already exited, skipping %s exit", pos.ticker, source)
+            return
         decision = {
             "ticker": pos.ticker,
             "action": "SELL",
@@ -483,6 +524,7 @@ class PositionTracker:
                 logger.info("[tracker] Exit executed for %s: %s", pos.ticker, result)
             except Exception as exc:
                 logger.error("[tracker] Exit execution failed for %s: %s", pos.ticker, exc)
+                return  # DO NOT untrack — position still exists on exchange
 
         # Publish exit event
         await self._bus.publish("position.exit", {
@@ -493,6 +535,7 @@ class PositionTracker:
             "exit_price": pos.current_price,
             "pnl_pct": pos.pnl_pct,
             "held_hours": pos.held_hours,
+            "qty": pos.qty,
             "broker": pos.broker_name,
         })
 
