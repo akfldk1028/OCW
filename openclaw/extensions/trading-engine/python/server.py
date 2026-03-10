@@ -762,9 +762,9 @@ def _start_scheduler():
                 if decisions:
                     # Track entry prices
                     for d in decisions:
-                        if d["action"] == "BUY" and d.get("price", 0) > 0:
+                        if d["action"] in ("BUY", "SHORT") and d.get("price", 0) > 0:
                             _crypto_entry_prices[d["ticker"]] = d["price"]
-                        elif d["action"] == "SELL":
+                        elif d["action"] in ("SELL", "COVER"):
                             _crypto_entry_prices.pop(d["ticker"], None)
 
                     exec_result = binance_broker.execute_decisions(decisions, dry_run=dry_run)
@@ -773,10 +773,11 @@ def _start_scheduler():
                                 exec_result.get("total_orders", 0),
                                 "dry_run" if dry_run else "LIVE")
 
-                    # Register BUY executions with position tracker
+                    # Register BUY/SHORT executions with position tracker
                     for d in decisions:
-                        if d["action"] == "BUY" and d.get("price", 0) > 0:
+                        if d["action"] in ("BUY", "SHORT") and d.get("price", 0) > 0:
                             qty = d.get("position_size_usd", 0) / d["price"] if d["price"] > 0 else 0
+                            side = "short" if d["action"] == "SHORT" else "long"
                             if qty > 0:
                                 position_tracker.track(
                                     ticker=d["ticker"],
@@ -785,6 +786,7 @@ def _start_scheduler():
                                     qty=qty,
                                     market_type="crypto",
                                     regime=ctx.get("regime", "unknown"),
+                                    side=side,
                                 )
                 else:
                     logger.info("[cron_crypto] No trades this cycle (regime=%s)", ctx.get("regime"))
@@ -1699,7 +1701,7 @@ async def get_signals(symbol: str = "btcusdt") -> List[Dict[str, Any]]:
         if ticker.replace("/", "").lower() != symbol.lower():
             continue
         action = payload.get("action", "")
-        if action in ("BUY", "SELL"):
+        if action in ("BUY", "SELL", "SHORT", "COVER"):
             signals.append({
                 "time": int(ev.get("timestamp", 0)),
                 "side": action,

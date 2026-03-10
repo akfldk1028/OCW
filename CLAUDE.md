@@ -17,7 +17,7 @@ Monorepo: `openclaw/` 안에 trading engine이 있음.
 ## Critical Rules
 - **REST 최소화**: Binance IP ban 위험. WS 우선, REST는 bootstrap 1회만
 - **ccxt >= 4.5 필수**: 2026-01-15 서명 변경
-- **ANTHROPIC_API_KEY 사용**: OAuth는 데이터센터에서 리프레시 불가 (Cloudflare 403)
+- **Max 구독 CLI 사용**: `claude --print` subprocess 호출. API key 절대 사용 금지 (main.py 시작 시 환경에서 자동 제거)
 - **Python 3.11**: venv 사용, `pip install -r binance/requirements.txt`
 - `.env` 파일 절대 커밋 금지 (`.gitignore`에 이미 차단됨)
 

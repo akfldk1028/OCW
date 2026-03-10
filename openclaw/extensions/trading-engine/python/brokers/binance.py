@@ -86,14 +86,18 @@ class BinanceBroker(BrokerBase):
             })
 
             if self.paper:
-                # Note: set_sandbox_mode → testnet.binance.vision (legacy, still works)
-                # To use new demo platform (demo-api.binance.com), switch to
-                # enable_demo_trading(True) and get API keys from demo platform.
-                use_demo = os.environ.get("BINANCE_USE_DEMO", "").lower() in ("1", "true")
+                # Futures: sandbox deprecated → use demo trading (demo-api.binance.com)
+                # Spot: sandbox still works (testnet.binance.vision)
+                use_demo = (
+                    self.market == "future"
+                    or os.environ.get("BINANCE_USE_DEMO", "").lower() in ("1", "true")
+                )
                 if use_demo and hasattr(self._exchange, "enable_demo_trading"):
                     self._exchange.enable_demo_trading(True)
+                    logger.info("Demo trading enabled (demo-api.binance.com) for %s", self.market)
                 else:
                     self._exchange.set_sandbox_mode(True)
+                    logger.info("Sandbox mode enabled (testnet.binance.vision) for %s", self.market)
 
             # Verify connection
             balance = self._exchange.fetch_balance()
@@ -102,9 +106,12 @@ class BinanceBroker(BrokerBase):
             total = balance.get("total", {})
             usdt = float(total.get("USDT", 0))
 
+            is_demo = os.environ.get("BINANCE_USE_DEMO", "").lower() in ("1", "true")
+            paper_mode = "demo" if (self.paper and is_demo) else ("testnet" if self.paper else "live")
+
             return {
                 "connected": True,
-                "mode": "testnet" if self.paper else "live",
+                "mode": paper_mode,
                 "market": self.market,
                 "exchange": "binance",
                 "usdt_balance": usdt,
@@ -114,7 +121,14 @@ class BinanceBroker(BrokerBase):
         except Exception as exc:
             self._connected = False
             self._detect_ip_ban(exc)
-            return {"connected": False, "error": str(exc), "exchange": "binance"}
+            err = str(exc)
+            is_demo = os.environ.get("BINANCE_USE_DEMO", "").lower() in ("1", "true")
+            if is_demo and ("Invalid API-key" in err or "-2015" in err):
+                err += (
+                    " | Demo trading requires API keys from https://www.binance.com/en/demo-trading"
+                    " (testnet keys do NOT work). Create demo keys and update .env."
+                )
+            return {"connected": False, "error": err, "exchange": "binance"}
 
     def get_account_status(self) -> Dict[str, Any]:
         """Get account balances and open positions."""
@@ -195,25 +209,39 @@ class BinanceBroker(BrokerBase):
             # Normalize ticker format (BTCUSDT -> BTC/USDT)
             symbol = self._normalize_symbol(ticker)
 
-            if "BUY" in action:
+            if action in ("BUY", "COVER"):
                 side = "buy"
-                qty = position_usd / price if price > 0 else 0
-            elif "SELL" in action:
+                if action == "COVER":
+                    # COVER: buy back to close short — use qty from decision
+                    qty = decision.get("qty", 0)
+                    if qty <= 0:
+                        qty = self._get_position_qty(symbol)
+                else:
+                    qty = position_usd / price if price > 0 else 0
+            elif action in ("SELL", "SHORT"):
                 side = "sell"
-                # Use qty from decision if provided (dry_run tracker data),
-                # otherwise fetch from exchange (live mode)
-                qty = decision.get("qty", 0)
-                if qty <= 0:
-                    qty = self._get_position_qty(symbol)
+                if action == "SHORT":
+                    # SHORT: sell to open — use position_size_usd
+                    qty = position_usd / price if price > 0 else 0
+                else:
+                    # SELL: close long — use qty from decision
+                    qty = decision.get("qty", 0)
+                    if qty <= 0:
+                        qty = self._get_position_qty(symbol)
             else:
                 continue
 
             if qty <= 0:
+                logger.warning("Order skipped: %s %s qty=0 (price=%.4f, usd=%.2f)",
+                               side, ticker, price, position_usd)
                 continue
 
             # Round to exchange precision
+            raw_qty = qty
             qty = self._round_qty(symbol, qty)
             if qty <= 0:
+                logger.warning("Order skipped after rounding: %s %s raw_qty=%.8f rounded=0",
+                               side, ticker, raw_qty)
                 continue
 
             total_orders += 1
@@ -239,20 +267,29 @@ class BinanceBroker(BrokerBase):
                     ticker_info = self._exchange.fetch_ticker(symbol)
                     current_price = ticker_info.get("last", price)
 
-                    # Slight offset for fill probability
+                    # Adaptive offset for fill probability: 0.1% base, wider during volatility
+                    # Check if decision includes ATR-based info for smarter offset
+                    atr_pct = decision.get("atr_pct", 0)
+                    offset = max(0.001, min(atr_pct * 0.3, 0.005)) if atr_pct > 0 else 0.001
                     if side == "buy":
-                        limit_price = current_price * 1.001  # 0.1% above for buy fill
+                        limit_price = current_price * (1 + offset)
                     else:
-                        limit_price = current_price * 0.999  # 0.1% below for sell fill
+                        limit_price = current_price * (1 - offset)
 
                     limit_price = self._round_price(symbol, limit_price)
 
+                    params = {}
+                    if self.market == "future":
+                        # SELL/COVER close existing positions — mark reduceOnly
+                        if action in ("SELL", "COVER"):
+                            params["reduceOnly"] = True
                     order = self._exchange.create_order(
                         symbol=symbol,
                         type=order_type,
                         side=side,
                         amount=qty,
                         price=limit_price,
+                        params=params,
                     )
                     order_result["status"] = "submitted"
                     order_result["order_id"] = order.get("id")
@@ -264,10 +301,34 @@ class BinanceBroker(BrokerBase):
                         side, qty, symbol, limit_price, confidence,
                     )
                 except Exception as exc:
+                    # Close failures: qty mismatch or below minimum — retry with fresh qty
+                    err_str = str(exc)
+                    if action in ("SELL", "COVER") and ("-4118" in err_str or "minimum amount" in err_str):
+                        try:
+                            fresh_qty = self._get_position_qty(symbol)
+                            if fresh_qty > 0 and fresh_qty != qty:
+                                fresh_qty = self._round_qty(symbol, fresh_qty)
+                                logger.info("Retrying %s %s with fresh qty %.8f (was %.8f)", side, symbol, fresh_qty, qty)
+                                retry_order = self._exchange.create_order(
+                                    symbol=symbol, type=order_type, side=side,
+                                    amount=fresh_qty, price=limit_price, params=params,
+                                )
+                                order_result["status"] = "submitted"
+                                order_result["order_id"] = retry_order.get("id")
+                                order_result["qty"] = fresh_qty
+                                order_result["retry"] = True
+                                successful += 1
+                                logger.info("Retry succeeded: %s %s %s @ %.2f", side, fresh_qty, symbol, limit_price)
+                                results.append(order_result)
+                                continue
+                            elif fresh_qty <= 0:
+                                logger.warning("No position found on exchange for %s — position may be closed", symbol)
+                        except Exception as retry_exc:
+                            logger.error("Retry also failed for %s: %s", symbol, retry_exc)
                     order_result["status"] = "failed"
                     order_result["error"] = str(exc)
                     failed += 1
-                    logger.error("Binance order failed for %s: %s", symbol, exc)
+                    logger.error("Binance order failed for %s: %s (qty=%.8f, price=%.2f, notional=%.2f)", symbol, exc, qty, limit_price, qty * limit_price)
 
             results.append(order_result)
 
@@ -289,31 +350,59 @@ class BinanceBroker(BrokerBase):
             return {}
 
         try:
-            balance = self._exchange.fetch_balance()
-            total = balance.get("total", {})
-
             result = {}
-            for symbol, amount in total.items():
-                amt = float(amount)
-                if amt <= 0 or symbol == "USDT":
-                    continue
 
-                pair = f"{symbol}/USDT"
+            if self.market == "future":
+                # Futures: fetch_positions returns actual long/short info
                 try:
-                    ticker_info = self._exchange.fetch_ticker(pair)
-                    current_price = ticker_info.get("last", 0)
-                except Exception:
-                    continue
+                    positions = self._exchange.fetch_positions()
+                    for pos in positions:
+                        amt = abs(float(pos.get("contracts", 0) or 0))
+                        if amt <= 0:
+                            continue
+                        symbol = pos.get("symbol", "")
+                        # Normalize: BTC/USDT:USDT → BTC/USDT for internal consistency
+                        if ":" in symbol:
+                            symbol = symbol.split(":")[0]
+                        side = pos.get("side", "long")  # "long" or "short"
+                        entry_px = float(pos.get("entryPrice", 0) or 0)
+                        current_px = float(pos.get("markPrice", 0) or pos.get("liquidationPrice", 0) or 0)
+                        unrealized = float(pos.get("unrealizedPnl", 0) or 0)
+                        result[symbol] = {
+                            "qty": amt,
+                            "entry_price": entry_px,
+                            "current_price": current_px,
+                            "market_value": amt * current_px,
+                            "unrealized_pl": unrealized,
+                            "unrealized_plpc": unrealized / (entry_px * amt) if entry_px * amt > 0 else 0,
+                            "side": side,
+                        }
+                except Exception as exc:
+                    logger.warning("fetch_positions failed, falling back to balance: %s", exc)
 
-                result[pair] = {
-                    "qty": amt,
-                    "entry_price": 0.0,  # ccxt doesn't track cost basis on spot
-                    "current_price": current_price,
-                    "market_value": amt * current_price,
-                    "unrealized_pl": 0.0,
-                    "unrealized_plpc": 0.0,
-                    "side": "long",
-                }
+            if not result:
+                # Spot fallback: balance-based (no short info available)
+                balance = self._exchange.fetch_balance()
+                total = balance.get("total", {})
+                for symbol, amount in total.items():
+                    amt = float(amount)
+                    if amt <= 0 or symbol == "USDT":
+                        continue
+                    pair = f"{symbol}/USDT"
+                    try:
+                        ticker_info = self._exchange.fetch_ticker(pair)
+                        current_price = ticker_info.get("last", 0)
+                    except Exception:
+                        continue
+                    result[pair] = {
+                        "qty": amt,
+                        "entry_price": 0.0,
+                        "current_price": current_price,
+                        "market_value": amt * current_price,
+                        "unrealized_pl": 0.0,
+                        "unrealized_plpc": 0.0,
+                        "side": "long",
+                    }
 
             return result
 
@@ -463,9 +552,17 @@ class BinanceBroker(BrokerBase):
         if not self._ensure_connected():
             return 0.0
         try:
-            base = symbol.split("/")[0]
-            balance = self._exchange.fetch_balance()
-            return float(balance.get("total", {}).get(base, 0))
+            if self.market == "future":
+                positions = self._exchange.fetch_positions([symbol])
+                for p in positions:
+                    contracts = abs(float(p.get("contracts", 0)))
+                    if contracts > 0:
+                        return contracts
+                return 0.0
+            else:
+                base = symbol.split("/")[0]
+                balance = self._exchange.fetch_balance()
+                return float(balance.get("total", {}).get(base, 0))
         except Exception:
             return 0.0
 

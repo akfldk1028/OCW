@@ -148,7 +148,6 @@ def test_circuit_breaker_half_open():
     agent = ClaudeAgent()
     agent._circuit_cooldown = 0.05  # 50ms for test
     agent._available = True
-    agent._auth_configured = True
 
     # Simulate 3 consecutive failures → circuit open
     agent._consecutive_failures = 3
@@ -161,9 +160,8 @@ def test_circuit_breaker_half_open():
     time.sleep(0.06)
 
     # Half-open: should reset and re-check
-    with patch("core.claude_agent._check_sdk", return_value=True):
-        with patch.object(agent, "_ensure_auth", return_value=True):
-            assert agent.is_available is True  # half-open → retry succeeds
+    with patch("core.claude_agent._check_cli", return_value=True):
+        assert agent.is_available is True  # half-open → retry succeeds
     assert agent._consecutive_failures == 0
     assert agent._circuit_open_time == 0.0
 

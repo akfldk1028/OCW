@@ -1,7 +1,7 @@
 # Trading Engine HANDOFF
 
-> 마지막 업데이트: 2026-02-24
-> 상태: Phase 1 (Agent-Autonomous Gate) 구현 완료 + 코드 리뷰 11개 버그 수정 완료
+> 마지막 업데이트: 2026-02-26
+> 상태: Phase 1 완료 + Multi-TF 부트스트랩 + TA 사전계산 + Sonnet 업그레이드
 
 ---
 
@@ -35,7 +35,7 @@ WS tick → AdaptiveGate (4-layer) → 통과 시에만 Claude 호출 (~10%)
 | `core/market_listener.py` | WS 수신 | Binance WS → `market.tick` 이벤트 (매 틱) |
 | `core/zscore_gate.py` | 게이트 | 4-layer: candle_close/timer/z-score/wake_condition |
 | `binance/runner.py` | 오케스트레이터 | tick→gate→snapshot→Claude→execute→RL |
-| `core/claude_agent.py` | 의사결정 | ClaudeSDK로 Sonnet 호출, JSON 응답 파싱 |
+| `core/claude_agent.py` | 의사결정 | ClaudeSDK로 Sonnet 4.6 호출, pre-computed TA, max_turns=3 |
 | `core/claude_auth.py` | 인증 | OAuth 토큰 해석, SDK env 구성 |
 | `core/online_learner.py` | RL | Regime-Aware Thompson Sampling, Beta(α,β) 업데이트 |
 | `core/position_tracker.py` | 포지션 감시 | 2-layer: safety(30s) + agent(180s) |
@@ -45,7 +45,7 @@ WS tick → AdaptiveGate (4-layer) → 통과 시에만 Claude 호출 (~10%)
 | `analysis/regime_detector_crypto.py` | 레짐 | BTC HMM 2-state (low_vol/high_vol) |
 | `analysis/macro_regime.py` | 매크로 | FRED 4사분면 (성장×인플레) |
 | `brokers/binance.py` | 브로커 | ccxt Binance Spot/Futures 주문 |
-| `binance/crypto_config.py` | 설정 | SWING/DAILY 모드, EVENT_CONFIG, gate 설정 |
+| `binance/crypto_config.py` | 설정 | SWING/DAILY 모드, EVENT_CONFIG(1m/5m/15m/1h), gate 설정 |
 | `config.py` | 전역 설정 | tickers, risk params, agent weights |
 
 ---
@@ -96,9 +96,18 @@ Claude 응답: {next_check_seconds: 3600, wake_conditions: [...], memory_update:
 
 ---
 
-## 수정 이력 (2026-02-24)
+## 수정 이력 (2026-02-26)
 
-### CRITICAL 버그 (수정 완료)
+### Multi-TF + 속도 + 모델 업그레이드 (2026-02-26)
+1. **Multi-TF 부트스트랩**: 1h만 → 5m(300봉)/15m(400봉)/1h(1440봉) 모두 부트스트랩
+2. **1h WS 실시간**: kline_intervals에 "1h" 추가 → 부트스트랩 후에도 stale 안 됨
+3. **4h 제거, 5m 추가**: agent_tools enum `["15m","1h","4h"]` → `["5m","15m","1h"]` (스캘핑 최적화)
+4. **TA 사전계산**: MarketSnapshot에 pre_computed_ta 필드 — RSI/MACD/EMA/BB/StochRSI/ATR/VWAP 5m/15m/1h
+5. **속도 최적화**: tool call 2-3회 제거 → max_turns 5→3, 예상 결정시간 33-42초→21-29초
+6. **Sonnet 업그레이드**: Haiku 4.5 → Sonnet 4.6 (CLAUDE_MODEL env var), OAuth = 무료
+7. **1m 프롬프트 제외**: MultiTFAggregator.format_for_prompt에 skip_intervals=("1m",) — 노이즈 감소
+
+### CRITICAL 버그 (수정 완료, 2026-02-24)
 1. `await` 누락: `event_bus.publish("decision.signal")` coroutine 미실행 → TS 시그널 유실
 2. SELL 시 `untrack()` 미호출 → double-sell 위험
 3. SELL 시 `position.exit` 미발행 → RL 피드백 루프 끊김

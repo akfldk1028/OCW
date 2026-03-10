@@ -53,6 +53,9 @@ from core.zscore_gate import AdaptiveGate
 from core.multi_tf_aggregator import MultiTFAggregator
 from core.ohlcv_store import OHLCVStore
 from core.memory_store import TradingMemory
+from core.liquidation_tracker import LiquidationTracker
+from core.ood_detector import OODDetector
+from core.exit_regret_tracker import ExitRegretTracker, ExitSnapshot
 from analysis.regime_detector_crypto import CryptoRegimeDetector
 from analysis.macro_regime import MacroRegimeDetector
 
@@ -76,13 +79,23 @@ class CryptoRunner:
         self._derivatives_context: Dict = {}
         self._agent_memory: str = ""
         self._last_tick_prices: Dict[str, float] = {}
+        self._last_close_prices: Dict[str, float] = {}  # candle-close prices for z-score
         self._exit_cooldowns: Dict[str, float] = {}  # {ticker: exit_timestamp} — anti-churn
         self._realized_pnl_usd: float = 0.0  # cumulative realized PnL from closed trades
+        self._broker_balance: float = 0.0  # actual broker balance, synced on startup
+        self._broker_balance_time: float = 0.0  # last sync time
         self._entry_meta: Dict[str, dict] = {}  # {ticker: {position_pct, confidence}} for meta-param RL
         self._state_file = DATA_DIR / "runner_state.json"
         # Counterfactual learning: snapshots of HOLD decisions for missed-opportunity tracking
+        # Multi-horizon: scalp (3min), swing (30min), trend (2h) — each checked independently
         from collections import deque
-        self._hold_snapshots: deque = deque(maxlen=50)  # {ts, ticker, price, ta_signals, regime}
+        self._hold_snapshots: deque = deque(maxlen=15)  # scalp horizon — reduced to limit CF noise
+        self._swing_snapshots: deque = deque(maxlen=10)  # swing horizon — reduced to limit CF noise
+        self._trend_snapshots: deque = deque(maxlen=8)   # trend horizon — reduced to limit CF noise
+        self._cf_count_today: int = 0                    # daily CF counter
+        self._cf_count_date: str = ""                    # date for CF counter reset
+        # Post-exit counterfactual: track price after exits for hold_patience learning
+        self.exit_regret_tracker = ExitRegretTracker()
 
         # OHLCV store — WS-fed, bootstrap once from REST, then zero REST calls
         self.ohlcv_store = OHLCVStore(maxlen=1500)
@@ -104,8 +117,6 @@ class CryptoRunner:
         self.online_learner = HierarchicalOnlineLearner(
             save_path=str(MODELS_DIR / "online_learner.json"),
             min_trades_to_adapt=5,
-            group_discount=0.98,   # groups are stable across regimes
-            signal_discount=0.95,  # signals adapt faster
         )
         self.online_learner.load()  # auto-migrates from v1/v2 if needed
 
@@ -163,6 +174,12 @@ class CryptoRunner:
             oi_spike_threshold=ecfg["oi_spike_threshold"],
         )
 
+        # Liquidation tracker: real-time WS forceOrder → cluster estimation → H-TS signal
+        self.liquidation_tracker = LiquidationTracker(tickers=cfg["tickers"])
+
+        # OOD detector: Mahalanobis distance for anomalous market state detection
+        self.ood_detector = OODDetector(window=200, min_samples=30)
+
         # Position tracker
         self.position_tracker = PositionTracker(
             event_bus=self.event_bus,
@@ -190,22 +207,29 @@ class CryptoRunner:
             pos = self.position_tracker.get_position(ticker)
             if pos:
                 entry_times[ticker] = pos.entry_time.isoformat()
-        # Capture trailing_highs and qty for restart recovery
+        # Capture trailing_highs, trailing_lows, qty, and side for restart recovery
         trailing_highs = {}
+        trailing_lows = {}
         position_qtys = {}
+        position_sides = {}
         for ticker in self._entry_prices:
             pos = self.position_tracker.get_position(ticker)
             if pos:
                 trailing_highs[ticker] = pos.trailing_high
+                trailing_lows[ticker] = pos.trailing_low
                 position_qtys[ticker] = pos.qty
+                position_sides[ticker] = pos.side
         state = {
             "entry_prices": self._entry_prices,
             "entry_times": entry_times,
             "trailing_highs": trailing_highs,
+            "trailing_lows": trailing_lows,
             "position_qtys": position_qtys,
+            "position_sides": position_sides,
             "agent_memory": self._agent_memory,
             "realized_pnl_usd": self._realized_pnl_usd,
             "entry_meta": self._entry_meta,
+            "initial_balance": self._initial_balance,
         }
         try:
             self._state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -224,10 +248,17 @@ class CryptoRunner:
             self._entry_prices = state.get("entry_prices", {})
             self._entry_times = state.get("entry_times", {})
             self._saved_trailing_highs = state.get("trailing_highs", {})
+            self._saved_trailing_lows = state.get("trailing_lows", {})
             self._saved_position_qtys = state.get("position_qtys", {})
+            self._saved_position_sides = state.get("position_sides", {})
             self._agent_memory = state.get("agent_memory", "")
             self._realized_pnl_usd = state.get("realized_pnl_usd", 0.0)
             self._entry_meta = state.get("entry_meta", {})
+            # Restore initial_balance if broker returned 0 (demo session expired)
+            saved_balance = state.get("initial_balance", 0.0)
+            if self._initial_balance <= 0 and saved_balance > 0:
+                self._initial_balance = saved_balance
+                logger.info("[runner] Restored initial_balance from state: $%.2f (broker returned $0)", saved_balance)
             if self._entry_prices:
                 logger.info("[runner] Restored state: %d entry_prices, memory=%d chars",
                             len(self._entry_prices), len(self._agent_memory))
@@ -261,11 +292,21 @@ class CryptoRunner:
 
             # Try broker first (live mode only)
             info = (positions_detail or {}).get(ticker)
-            qty = info.get("qty", 0) if info else 0
+            broker_qty = info.get("qty", 0) if info else 0
+            saved_qty = getattr(self, "_saved_position_qtys", {}).get(ticker, 0)
 
-            # Use saved qty from state file first (accurate across restarts)
-            if qty <= 0:
-                qty = getattr(self, "_saved_position_qtys", {}).get(ticker, 0)
+            # Prefer saved qty if broker qty differs significantly (>2x mismatch)
+            if broker_qty > 0 and saved_qty > 0:
+                ratio = max(broker_qty, saved_qty) / min(broker_qty, saved_qty)
+                if ratio > 2.0:
+                    logger.warning("[runner] Position qty mismatch for %s: broker=%.8f saved=%.8f (ratio=%.1fx) — using saved", ticker, broker_qty, saved_qty, ratio)
+                    qty = saved_qty
+                else:
+                    qty = broker_qty
+            elif broker_qty > 0:
+                qty = broker_qty
+            else:
+                qty = saved_qty
 
             # Last resort: estimate qty from entry price (legacy fallback)
             if qty <= 0 and dry_run:
@@ -286,6 +327,7 @@ class CryptoRunner:
                         saved_time = dt.fromisoformat(time_str)
                     except (ValueError, TypeError):
                         pass
+                saved_side = getattr(self, "_saved_position_sides", {}).get(ticker, "long")
                 pos = self.position_tracker.track(
                     ticker=ticker,
                     broker="binance",
@@ -293,14 +335,30 @@ class CryptoRunner:
                     qty=qty,
                     market_type="crypto",
                     entry_time=saved_time,
+                    side=saved_side,
                 )
-                # Restore trailing_high from saved state (crash protection)
+                # Restore trailing_high — but cap to current WS price to prevent
+                # immediate trailing stop trigger on restart
                 saved_th = getattr(self, "_saved_trailing_highs", {}).get(ticker)
                 if saved_th and saved_th > entry_price:
-                    pos.trailing_high = saved_th
+                    ws_price = self._last_tick_prices.get(ticker, 0)
+                    if ws_price > 0:
+                        # Cap trailing_high to max of current price (can't trail above live price)
+                        pos.trailing_high = min(saved_th, ws_price * 1.005)  # 0.5% tolerance
+                    else:
+                        pos.trailing_high = saved_th
+                # Restore trailing_low for short positions
+                saved_tl = getattr(self, "_saved_trailing_lows", {}).get(ticker)
+                if saved_tl and saved_tl > 0 and saved_tl < entry_price:
+                    ws_price = self._last_tick_prices.get(ticker, 0)
+                    if ws_price > 0:
+                        pos.trailing_low = max(saved_tl, ws_price * 0.995)
+                    else:
+                        pos.trailing_low = saved_tl
                 restored += 1
-                logger.info("[runner] Restored position: %s @ %.4f x %.6f (trail_high=%.4f)%s",
-                            ticker, entry_price, qty, pos.trailing_high,
+                logger.info("[runner] Restored position: %s %s @ %.4f x %.6f (trail_high=%.4f, trail_low=%.4f)%s",
+                            saved_side.upper(), ticker, entry_price, qty,
+                            pos.trailing_high, pos.trailing_low,
                             " (dry_run)" if dry_run else "")
 
         if restored:
@@ -356,12 +414,6 @@ class CryptoRunner:
             "positions": list(snapshot.positions.keys()),
         }
 
-        # Collect tool calls from Claude agent
-        tool_calls = []
-        try:
-            tool_calls = list(self.claude_agent._last_tool_calls)
-        except Exception:
-            pass
 
         if agent_result:
             entry["claude_assessment"] = agent_result.get("market_assessment", "")
@@ -369,7 +421,6 @@ class CryptoRunner:
             entry["wake_conditions"] = agent_result.get("wake_conditions", [])
             entry["memory"] = agent_result.get("memory_update", "")
             entry["learning_note"] = agent_result.get("learning_note", "")
-            entry["tool_calls"] = [{"name": n, "input": i} for n, i in tool_calls]
 
         trade_entries = []
         if decisions:
@@ -401,11 +452,6 @@ class CryptoRunner:
                 f.write(f"[{ts}] Trigger: {trigger}\n")
                 f.write(f"BTC: ${snapshot.btc_price:,.2f} | Regime: {snapshot.combined_regime} | F&G: {snapshot.fear_greed_index}\n")
                 f.write(f"Portfolio: ${snapshot.portfolio_value:,.2f} | Positions: {', '.join(snapshot.positions.keys()) or 'none'}\n")
-                if tool_calls:
-                    f.write(f"\n--- Tool Calls ({len(tool_calls)}) ---\n")
-                    for i, (name, inp) in enumerate(tool_calls, 1):
-                        short_name = name.replace("mcp__trading__", "")
-                        f.write(f"  {i}. {short_name}({inp[:120]})\n")
                 if agent_result:
                     f.write(f"\n--- Claude Assessment ---\n")
                     f.write(f"{agent_result.get('market_assessment', 'N/A')}\n")
@@ -432,6 +478,255 @@ class CryptoRunner:
     # Counterfactual learning helpers
     # ------------------------------------------------------------------
 
+    def _extract_ta_signals(self, ticker: str, snapshot: MarketSnapshot) -> Dict[str, float]:
+        """Extract TA-derived signals from snapshot for H-TS virtual updates.
+
+        Used for both counterfactual snapshots and entry-time TA capture.
+        Maps raw TA indicators (15m) → normalized signal values in [-1, 1].
+        """
+        ta_signals: Dict[str, float] = {}
+        price = snapshot.ticker_prices.get(ticker, 0)
+        if price <= 0:
+            return ta_signals
+
+        ta = snapshot.pre_computed_ta.get(ticker, {}).get("15m", {})
+        if not ta:
+            return ta_signals
+
+        # RSI → rsi_signal
+        rsi = ta.get("rsi", 50)
+        if rsi > 55:
+            ta_signals["rsi_signal"] = min(1.0, (rsi - 50) / 50)
+        elif rsi < 45:
+            ta_signals["rsi_signal"] = max(-1.0, (rsi - 50) / 50)
+
+        # StochRSI → stoch_rsi
+        stoch = ta.get("stoch_rsi", 50)
+        if stoch > 60:
+            ta_signals["stoch_rsi"] = min(1.0, (stoch - 50) / 50)
+        elif stoch < 40:
+            ta_signals["stoch_rsi"] = max(-1.0, (stoch - 50) / 50)
+
+        # EMA cross
+        ema = ta.get("ema_cross", {})
+        if ema.get("status") == "bullish":
+            ta_signals["ema_cross_fast"] = min(1.0, abs(ema.get("gap_pct", 0)) * 100 + 0.3)
+        elif ema.get("status") == "bearish":
+            ta_signals["ema_cross_fast"] = -min(1.0, abs(ema.get("gap_pct", 0)) * 100 + 0.3)
+
+        # MACD histogram
+        macd_h = ta.get("macd", {}).get("histogram", 0)
+        if macd_h and isinstance(macd_h, (int, float)) and price > 0:
+            macd_pct = macd_h / price
+            ta_signals["macd_histogram"] = max(-1.0, min(1.0, macd_pct * 500))
+
+        # Bollinger %B → bb_deviation
+        bb_pctb = ta.get("bollinger", {}).get("pct_b", 0.5)
+        if isinstance(bb_pctb, (int, float)):
+            if bb_pctb > 0.8:
+                ta_signals["bb_deviation"] = min(1.0, (bb_pctb - 0.5) * 2)
+            elif bb_pctb < 0.2:
+                ta_signals["bb_deviation"] = max(-1.0, (bb_pctb - 0.5) * 2)
+
+        # VWAP deviation
+        vwap_dev = ta.get("vwap", {}).get("deviation_pct", 0)
+        if vwap_dev and isinstance(vwap_dev, (int, float)):
+            ta_signals["vwap_deviation"] = max(-1.0, min(1.0, vwap_dev * 10))
+
+        # Trend strength from multi-TF
+        tf_summary = self.multi_tf_aggregator.get_summary(ticker)
+        if tf_summary:
+            s15m = tf_summary.get("15m", {})
+            if s15m.get("ema_cross") == "bullish":
+                ta_signals["trend_strength"] = 0.5
+            elif s15m.get("ema_cross") == "bearish":
+                ta_signals["trend_strength"] = -0.5
+
+        # Support/resistance from TA
+        sr = ta.get("support_resistance")
+        if sr and isinstance(sr, dict):
+            dist = sr.get("distance_pct", 0)
+            if isinstance(dist, (int, float)) and abs(dist) > 0.001:
+                ta_signals["support_resistance"] = max(-1.0, min(1.0, -dist * 50))
+
+        # Volume spike
+        vol = ta.get("volume", {})
+        if isinstance(vol, dict):
+            vol_ratio = vol.get("ratio", 1.0)
+            if isinstance(vol_ratio, (int, float)):
+                if vol_ratio > 1.5:
+                    ta_signals["volume_spike"] = min(1.0, (vol_ratio - 1) / 2)
+                elif vol_ratio < 0.5:
+                    ta_signals["volume_spike"] = max(-1.0, (vol_ratio - 1))
+
+        # -- Derivatives signals --
+        # Funding rate
+        fr = snapshot.funding_rates.get(ticker, 0)
+        if isinstance(fr, (int, float)) and abs(fr) > 0.0001:
+            # Positive funding = longs pay → bearish signal
+            ta_signals["funding_rate"] = max(-1.0, min(1.0, -fr * 2000))
+
+        # OI change (4h change from Binance OI History)
+        oi = snapshot.open_interest.get(ticker, {})
+        if isinstance(oi, dict):
+            oi_chg = oi.get("change_pct", 0)
+            if isinstance(oi_chg, (int, float)) and abs(oi_chg) > 0.002:
+                ta_signals["oi_change"] = max(-1.0, min(1.0, oi_chg * 10))
+
+        # Long/short ratio
+        ls = snapshot.long_short_ratio.get(ticker, {})
+        if isinstance(ls, dict):
+            ratio = ls.get("long_short_ratio", ls.get("ratio", 1.0))
+            if isinstance(ratio, (int, float)) and abs(ratio - 1.0) > 0.05:
+                # ratio > 1 = more longs = contrarian bearish
+                ta_signals["long_short_ratio"] = max(-1.0, min(1.0, -(ratio - 1.0) * 2))
+
+        # Basis spread
+        basis = snapshot.basis_spreads.get(ticker, 0)
+        if isinstance(basis, (int, float)) and abs(basis) > 0.05:
+            ta_signals["basis_spread"] = max(-1.0, min(1.0, basis / 0.5))
+
+        # -- Macro signals --
+        # Fear & Greed → sentiment
+        fg = getattr(snapshot, 'fear_greed_index', None)
+        if fg and isinstance(fg, (int, float)):
+            ta_signals["fear_greed"] = (fg - 50) / 50  # 0→-1, 50→0, 100→+1
+
+        # Market regime (from regime detector)
+        regime = getattr(snapshot, 'regime', '')
+        if regime:
+            if 'bull' in regime:
+                ta_signals["market_regime"] = 0.5
+            elif 'bear' in regime or 'stag' in regime:
+                ta_signals["market_regime"] = -0.5
+
+        # --- 추가 시그널 (12개) ---
+
+        # ema_cross_slow (EMA21 vs EMA50)
+        ema_21 = ta.get("ema_cross", {}).get("ema_21", 0)
+        ema_50 = ta.get("ema_50")
+        if ema_21 and ema_50:
+            ta_signals["ema_cross_slow"] = 0.5 if ema_21 > ema_50 else -0.5
+
+        # supertrend
+        st_dir = ta.get("supertrend_dir")
+        if st_dir is not None and st_dir != 0:
+            ta_signals["supertrend"] = 0.6 if st_dir > 0 else -0.6
+
+        # bb_squeeze (Bollinger bandwidth)
+        bw = ta.get("bollinger", {}).get("bandwidth", 0)
+        if isinstance(bw, (int, float)) and bw > 0:
+            if bw < 0.02:
+                ta_signals["bb_squeeze"] = 0.5   # breakout imminent
+            elif bw > 0.06:
+                ta_signals["bb_squeeze"] = -0.3  # extended
+
+        # cvd_signal (taker buy/sell ratio)
+        td = getattr(snapshot, 'taker_delta', {})
+        if isinstance(td, dict):
+            td_data = td.get(ticker, {})
+            if isinstance(td_data, dict):
+                bsr = td_data.get("buy_sell_ratio", td_data.get("ratio", 1.0))
+                if isinstance(bsr, (int, float)) and abs(bsr - 1.0) > 0.02:
+                    ta_signals["cvd_signal"] = max(-1.0, min(1.0, (bsr - 1.0) * 5))
+
+        # obv_divergence
+        obv_dir = ta.get("obv_direction")
+        if obv_dir is not None and obv_dir != 0:
+            ta_signals["obv_divergence"] = max(-1.0, min(1.0, obv_dir))
+
+        # mfi_signal (Money Flow Index — continuous, not just extremes)
+        mfi = ta.get("mfi")
+        if isinstance(mfi, (int, float)):
+            # Continuous signal: 50=neutral, >50=bullish, <50=bearish
+            ta_signals["mfi_signal"] = max(-1.0, min(1.0, (mfi - 50) / 50))
+
+        # volume_profile (VWAP proximity)
+        vwap_data = ta.get("vwap", {})
+        if isinstance(vwap_data, dict) and price > 0:
+            upper_1sd = vwap_data.get("upper_1sd", 0)
+            lower_1sd = vwap_data.get("lower_1sd", 0)
+            if upper_1sd and lower_1sd:
+                in_value_area = lower_1sd <= price <= upper_1sd
+                ta_signals["volume_profile"] = 0.3 if in_value_area else -0.3
+
+        # liquidation_level
+        if hasattr(self, 'liquidation_tracker'):
+            fr_val = snapshot.funding_rates.get(ticker, 0)
+            oi_data = snapshot.open_interest.get(ticker, {})
+            oi_usd = oi_data.get("oi_usd", oi_data.get("value", 0)) if isinstance(oi_data, dict) else 0
+            try:
+                liq_sig = self.liquidation_tracker.get_signal(ticker, price, oi_usd, fr_val)
+                if abs(liq_sig) > 0.1:
+                    ta_signals["liquidation_level"] = liq_sig
+            except Exception:
+                pass
+
+        # volatility_regime (ATR-based)
+        atr_pct = ta.get("atr_pct", 0)
+        if isinstance(atr_pct, (int, float)) and atr_pct > 0:
+            atr_pct_100 = atr_pct * 100 if atr_pct < 1 else atr_pct  # handle fraction vs percent
+            if atr_pct_100 > 2.0:
+                ta_signals["volatility_regime"] = 0.7
+            elif atr_pct_100 < 0.5:
+                ta_signals["volatility_regime"] = -0.5
+
+        # dxy_direction
+        dxy_dir = getattr(snapshot, 'dxy_direction', '')
+        if dxy_dir == 'strengthening':
+            ta_signals["dxy_direction"] = -0.5
+        elif dxy_dir == 'weakening':
+            ta_signals["dxy_direction"] = 0.5
+
+        # etf_flow
+        # etf_flow (spot volume anomaly proxy for institutional flow)
+        etf = getattr(snapshot, 'etf_daily_flow_usd', 0)
+        if isinstance(etf, (int, float)) and abs(etf) > 0:
+            # Proxy: volume excess USD. Normalize by 2B (typical daily vol ~2-3B)
+            ta_signals["etf_flow"] = max(-1.0, min(1.0, etf / 2_000_000_000))
+
+        # stablecoin_flow (USDT daily supply change)
+        sc_chg = getattr(snapshot, 'stablecoin_change_pct', 0)
+        if isinstance(sc_chg, (int, float)) and abs(sc_chg) > 0.0002:
+            ta_signals["stablecoin_flow"] = max(-1.0, min(1.0, sc_chg * 500))
+
+        # btc_dominance (BTC.D trend — high dominance = alt weakness)
+        btc_d = getattr(snapshot, 'btc_dominance_pct', 0)
+        if isinstance(btc_d, (int, float)) and btc_d > 0:
+            # BTC.D > 55% = BTC strong (alt bearish), < 45% = alt season
+            if btc_d > 55:
+                ta_signals["btc_dominance"] = min(1.0, (btc_d - 50) / 15)
+            elif btc_d < 45:
+                ta_signals["btc_dominance"] = max(-1.0, (btc_d - 50) / 15)
+
+        # social_buzz (trending coins excitement level)
+        buzz = getattr(snapshot, 'social_buzz_score', 0)
+        if isinstance(buzz, (int, float)) and buzz > 0:
+            # High buzz (avg |change| > 10%) = extreme sentiment
+            if buzz > 15:
+                ta_signals["social_buzz"] = 0.7  # extreme buzz, contrarian caution
+            elif buzz > 5:
+                ta_signals["social_buzz"] = 0.3  # moderate excitement
+            elif buzz < 2:
+                ta_signals["social_buzz"] = -0.3  # dead market
+
+        # news_sentiment (headline analysis)
+        ns = getattr(snapshot, 'news_sentiment_score', 0)
+        if isinstance(ns, (int, float)) and abs(ns) > 0.02:
+            ta_signals["news_sentiment"] = max(-1.0, min(1.0, ns))
+
+        # whale_activity (large BTC transactions)
+        whale = getattr(snapshot, 'whale_activity_score', 0)
+        if isinstance(whale, (int, float)) and whale > 0.2:
+            ta_signals["whale_activity"] = min(1.0, whale)
+
+        # exchange_flow (exchange netflow — negative = outflow = bullish)
+        exflow = getattr(snapshot, 'exchange_netflow_score', 0)
+        if isinstance(exflow, (int, float)) and abs(exflow) > 0.1:
+            ta_signals["exchange_flow"] = max(-1.0, min(1.0, exflow))
+
+        return ta_signals
+
     def _save_hold_snapshot(self, snapshot: MarketSnapshot) -> None:
         """Save price+TA snapshot when Claude decides HOLD (no trades).
 
@@ -447,114 +742,244 @@ class CryptoRunner:
             if tic in self._entry_prices:
                 continue
 
-            # Extract TA signals from pre-computed data (5m timeframe)
-            ta_signals: Dict[str, float] = {}
-            ta = snapshot.pre_computed_ta.get(tic, {}).get("5m", {})
-            if ta:
-                # RSI → rsi_signal: >70 bullish momentum, <30 bearish (5m scalp thresholds)
-                rsi = ta.get("rsi", 50)
-                if rsi > 55:
-                    ta_signals["rsi_signal"] = min(1.0, (rsi - 50) / 50)
-                elif rsi < 45:
-                    ta_signals["rsi_signal"] = max(-1.0, (rsi - 50) / 50)
-
-                # StochRSI → stoch_rsi: >60 bullish momentum, <40 bearish (sensitive for scalping)
-                stoch = ta.get("stoch_rsi", 50)
-                if stoch > 60:
-                    ta_signals["stoch_rsi"] = min(1.0, (stoch - 50) / 50)
-                elif stoch < 40:
-                    ta_signals["stoch_rsi"] = max(-1.0, (stoch - 50) / 50)
-
-                # EMA cross
-                ema = ta.get("ema_cross", {})
-                if ema.get("status") == "bullish":
-                    ta_signals["ema_cross_fast"] = min(1.0, abs(ema.get("gap_pct", 0)) * 100 + 0.3)
-                elif ema.get("status") == "bearish":
-                    ta_signals["ema_cross_fast"] = -min(1.0, abs(ema.get("gap_pct", 0)) * 100 + 0.3)
-
-                # MACD histogram (normalize as % of price for cross-asset compatibility)
-                macd_h = ta.get("macd", {}).get("histogram", 0)
-                if macd_h and isinstance(macd_h, (int, float)) and price > 0:
-                    macd_pct = macd_h / price  # normalize to % of price
-                    ta_signals["macd_histogram"] = max(-1.0, min(1.0, macd_pct * 500))
-
-                # Bollinger %B → bb_deviation
-                bb_pctb = ta.get("bollinger", {}).get("pct_b", 0.5)
-                if isinstance(bb_pctb, (int, float)):
-                    if bb_pctb > 0.8:
-                        ta_signals["bb_deviation"] = min(1.0, (bb_pctb - 0.5) * 2)
-                    elif bb_pctb < 0.2:
-                        ta_signals["bb_deviation"] = max(-1.0, (bb_pctb - 0.5) * 2)
-
-                # VWAP deviation
-                vwap_dev = ta.get("vwap", {}).get("deviation_pct", 0)
-                if vwap_dev and isinstance(vwap_dev, (int, float)):
-                    ta_signals["vwap_deviation"] = max(-1.0, min(1.0, vwap_dev * 10))
-
-                # Trend strength from multi-TF
-                tf_summary = self.multi_tf_aggregator.get_summary(tic)
-                if tf_summary:
-                    s5m = tf_summary.get("5m", {})
-                    if s5m.get("ema_cross") == "bullish":
-                        ta_signals["trend_strength"] = 0.5
-                    elif s5m.get("ema_cross") == "bearish":
-                        ta_signals["trend_strength"] = -0.5
+            ta_signals = self._extract_ta_signals(tic, snapshot)
 
             if ta_signals:
-                self._hold_snapshots.append({
+                snap = {
                     "ts": now,
                     "ticker": tic,
                     "price": price,
                     "ta_signals": ta_signals,
                     "regime": snapshot.combined_regime,
-                })
+                }
+                self._hold_snapshots.append(snap)
+                # Also save for longer horizons (swing 30min, trend 2h)
+                self._swing_snapshots.append(dict(snap))
+                self._trend_snapshots.append(dict(snap))
 
     def _check_counterfactuals(self) -> None:
-        """Check old HOLD snapshots for missed opportunities.
+        """Check HOLD snapshots across multiple time horizons.
 
-        If price moved >0.3% since the HOLD, feed into H-TS as
-        counterfactual (phantom trade with 30% weight).
-        Snapshots must be at least 10 minutes old.
+        Three horizons capture different missed-opportunity types:
+          - Scalp  (3 min,  0.30 weight): quick momentum moves
+          - Swing  (30 min, 0.25 weight): dip-buy / mean-reversion
+          - Trend  (2 hr,   0.20 weight): regime-shift missed entries
+
+        Each horizon has its own deque. Snapshots expire after their
+        check window so they don't accumulate indefinitely.
+
+        Daily CF cap: max 3× real trades to prevent CF noise from
+        overwhelming actual trade signals in H-TS learning.
         """
         now = time.time()
-        MIN_AGE_S = 180  # 3 minutes (scalping pace — fast enough to catch moves)
-        processed = []
+        # Daily CF counter reset
+        today = time.strftime("%Y-%m-%d")
+        if self._cf_count_date != today:
+            self._cf_count_date = today
+            self._cf_count_today = 0
+        # Cap: max 3× real trades per day (minimum 15 to allow early learning)
+        real_trades_today = max(5, self.online_learner.total_trades_today if hasattr(self.online_learner, 'total_trades_today') else 5)
+        cf_cap = real_trades_today * 3
+        if self._cf_count_today >= cf_cap:
+            return
+        horizons = [
+            # (deque,                 min_age_s, max_age_s, discount, label)
+            # Scaled for 1h primary: scalp=10-30min, swing=2-6h, trend=12-48h
+            (self._hold_snapshots,    600,       1800,      0.30, "scalp"),    # 10-30 min
+            (self._swing_snapshots,   7200,      21600,     0.25, "swing"),    # 2-6 hr
+            (self._trend_snapshots,   43200,     172800,    0.20, "trend"),    # 12-48 hr
+        ]
 
-        for snap in self._hold_snapshots:
-            age = now - snap["ts"]
-            if age < MIN_AGE_S:
-                continue  # too fresh, check later
+        for snapshots, min_age, max_age, discount, label in horizons:
+            processed = []
+            for snap in snapshots:
+                age = now - snap["ts"]
+                if age < min_age:
+                    continue  # too fresh
+                if age > max_age:
+                    processed.append(snap)  # expired, discard
+                    continue
 
-            ticker = snap["ticker"]
-            current_price = self._last_tick_prices.get(ticker, 0)
-            if current_price <= 0:
+                ticker = snap["ticker"]
+                current_price = self._last_tick_prices.get(ticker, 0)
+                if current_price <= 0:
+                    processed.append(snap)
+                    continue
+
+                raw_pnl = (current_price - snap["price"]) / snap["price"]
+                if self._cf_count_today >= cf_cap:
+                    processed.append(snap)
+                    continue
+                try:
+                    if raw_pnl > 0:
+                        # Price went up → missed opportunity (should have bought)
+                        self._cf_count_today += 1
+                        result = self.online_learner.record_counterfactual(
+                            ticker=ticker,
+                            price_at_hold=snap["price"],
+                            price_now=current_price,
+                            ta_signals=snap["ta_signals"],
+                            regime=snap["regime"],
+                            discount_factor=discount,
+                        )
+                        if result:
+                            logger.info("[counterfactual:%s] %s: hold@$%.2f → now@$%.2f, raw=%+.2f%% (missed buy)",
+                                        label, ticker, snap["price"], current_price,
+                                        raw_pnl * 100)
+                            try:
+                                self.diary.record_missed_opportunity(
+                                    ticker=ticker,
+                                    hold_price=snap["price"],
+                                    current_price=current_price,
+                                    raw_pnl_pct=raw_pnl,
+                                    horizon=label,
+                                    regime=snap["regime"],
+                                    ta_signals=snap["ta_signals"],
+                                    direction="LONG",
+                                )
+                            except Exception:
+                                pass
+                    else:
+                        # Price went down → two perspectives:
+                        # 1. Correct hold on long (avoided buying into drop)
+                        self._cf_count_today += 1
+                        result = self.online_learner.record_correct_hold(
+                            ticker=ticker,
+                            price_at_hold=snap["price"],
+                            price_now=current_price,
+                            ta_signals=snap["ta_signals"],
+                            regime=snap["regime"],
+                            discount_factor=discount,
+                        )
+                        if result:
+                            logger.info("[correct_hold:%s] %s: hold@$%.2f → now@$%.2f, avoided=%+.2f%%",
+                                        label, ticker, snap["price"], current_price,
+                                        raw_pnl * 100)
+                            try:
+                                self.diary.record_correct_hold(
+                                    ticker=ticker,
+                                    hold_price=snap["price"],
+                                    current_price=current_price,
+                                    avoided_pct=raw_pnl,
+                                    horizon=label,
+                                    regime=snap["regime"],
+                                    ta_signals=snap["ta_signals"],
+                                )
+                            except Exception:
+                                pass
+
+                        # 2. Missed SHORT opportunity (price dropped = short would profit)
+                        #    Feed to H-TS: record_counterfactual already handles
+                        #    price_went_up=False → bearish signals get aligned correctly
+                        short_pnl = -raw_pnl  # short profit = price drop
+                        if short_pnl > 0.005 and self._cf_count_today < cf_cap:  # >0.5% missed short
+                            logger.info("[counterfactual:%s] %s: missed SHORT @$%.2f → $%.2f, would-be=%+.2f%%",
+                                        label, ticker, snap["price"], current_price,
+                                        short_pnl * 100)
+                            # Pass original signals — alignment logic already correct:
+                            # bearish signal + price_went_up=False → aligned=True → reward
+                            try:
+                                self.online_learner.record_counterfactual(
+                                    ticker=ticker,
+                                    price_at_hold=snap["price"],
+                                    price_now=current_price,
+                                    ta_signals=snap["ta_signals"],
+                                    regime=snap["regime"],
+                                    discount_factor=discount * 0.5,  # lower weight than long counterfactual
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                self.diary.record_missed_opportunity(
+                                    ticker=ticker,
+                                    hold_price=snap["price"],
+                                    current_price=current_price,
+                                    raw_pnl_pct=short_pnl,
+                                    horizon=label,
+                                    regime=snap["regime"],
+                                    ta_signals=snap["ta_signals"],
+                                    direction="SHORT",
+                                )
+                            except Exception:
+                                pass
+                except Exception as exc:
+                    logger.debug("[counterfactual:%s] Failed: %s", label, exc)
+
                 processed.append(snap)
-                continue
 
-            try:
-                result = self.online_learner.record_counterfactual(
-                    ticker=ticker,
-                    price_at_hold=snap["price"],
-                    price_now=current_price,
-                    ta_signals=snap["ta_signals"],
-                    regime=snap["regime"],
-                    discount_factor=0.3,
+            for snap in processed:
+                try:
+                    snapshots.remove(snap)
+                except ValueError:
+                    pass
+
+    def _check_exit_regrets(self) -> None:
+        """Post-exit counterfactual: check if recent exits were premature or well-timed."""
+
+        def price_fetcher(ticker: str) -> float:
+            return self._last_tick_prices.get(ticker, 0)
+
+        def on_regret(snap: ExitSnapshot, horizon: str, price_now: float,
+                      additional_pnl: float, discount: float) -> None:
+            """Premature exit — price continued in our favor."""
+            result = self.online_learner.record_exit_regret(
+                ticker=snap.ticker,
+                exit_price=snap.exit_price,
+                price_now=price_now,
+                pnl_at_exit=snap.pnl_pct,
+                held_hours=snap.held_hours,
+                agent_signals=snap.agent_signals,
+                regime=snap.regime,
+                position_side=snap.position_side,
+                discount_factor=discount,
+                was_premature=True,
+            )
+            if result:
+                self.diary.record_exit_regret(
+                    ticker=snap.ticker,
+                    exit_price=snap.exit_price,
+                    current_price=price_now,
+                    pnl_at_exit=snap.pnl_pct,
+                    additional_pnl=additional_pnl,
+                    horizon=horizon,
+                    regime=snap.regime,
+                    agent_signals=snap.agent_signals,
+                    held_hours=snap.held_hours,
+                    position_side=snap.position_side,
+                    was_premature=True,
                 )
-                if result:
-                    logger.info("[counterfactual] %s: hold@$%.2f → now@$%.2f, raw=%+.2f%%",
-                                ticker, snap["price"], current_price,
-                                result["raw_pnl"] * 100)
-            except Exception as exc:
-                logger.debug("[counterfactual] Failed: %s", exc)
 
-            processed.append(snap)
+        def on_validated(snap: ExitSnapshot, horizon: str, price_now: float,
+                         additional_pnl: float, discount: float) -> None:
+            """Good exit — price reversed after we closed."""
+            result = self.online_learner.record_exit_regret(
+                ticker=snap.ticker,
+                exit_price=snap.exit_price,
+                price_now=price_now,
+                pnl_at_exit=snap.pnl_pct,
+                held_hours=snap.held_hours,
+                agent_signals=snap.agent_signals,
+                regime=snap.regime,
+                position_side=snap.position_side,
+                discount_factor=discount,
+                was_premature=False,
+            )
+            if result:
+                self.diary.record_exit_regret(
+                    ticker=snap.ticker,
+                    exit_price=snap.exit_price,
+                    current_price=price_now,
+                    pnl_at_exit=snap.pnl_pct,
+                    additional_pnl=additional_pnl,
+                    horizon=horizon,
+                    regime=snap.regime,
+                    agent_signals=snap.agent_signals,
+                    held_hours=snap.held_hours,
+                    position_side=snap.position_side,
+                    was_premature=False,
+                )
 
-        # Remove processed snapshots
-        for snap in processed:
-            try:
-                self._hold_snapshots.remove(snap)
-            except ValueError:
-                pass
+        self.exit_regret_tracker.check_exits(price_fetcher, on_regret, on_validated)
 
     def _find_entry_context(self, ticker: str) -> Dict[str, Any]:
         """Find the last BUY decision for this ticker from decisions.jsonl.
@@ -579,7 +1004,7 @@ class CryptoRunner:
                 except json.JSONDecodeError:
                     continue
                 for t in entry.get("trades", []):
-                    if t.get("action") == "BUY" and t.get("ticker", "") == ticker:
+                    if t.get("action") in ("BUY", "SHORT") and t.get("ticker", "") == ticker:
                         result["reasoning"] = t.get("reasoning", "")
                         result["confidence"] = t.get("confidence", 0)
                         result["signal_weights"] = t.get("signal_weights", {})
@@ -607,16 +1032,21 @@ class CryptoRunner:
                 logger.error("[tick] Failed: %s", exc)
 
         async def _on_funding_extreme(event):
-            self._derivatives_context = self.derivatives_monitor.get_context()
+            ctx = self.derivatives_monitor.get_context()
+            ctx["_ts"] = time.time()  # timestamp for staleness detection
+            self._derivatives_context = ctx
             logger.info("[runner] Funding extreme stored: %s", event.payload.get("ticker"))
 
         async def _on_oi_spike(event):
-            self._derivatives_context = self.derivatives_monitor.get_context()
+            ctx = self.derivatives_monitor.get_context()
+            ctx["_ts"] = time.time()
+            self._derivatives_context = ctx
             logger.info("[runner] OI spike stored: %s", event.payload.get("ticker"))
 
         self.event_bus.subscribe("market.tick", _on_tick)
         self.event_bus.subscribe("market.funding_extreme", _on_funding_extreme)
         self.event_bus.subscribe("market.oi_spike", _on_oi_spike)
+        self.event_bus.subscribe("market.force_order", self.liquidation_tracker.on_force_order)
 
     def _setup_tracker(self) -> None:
         """Wire position tracker with price fetcher, evaluator, and executor."""
@@ -677,6 +1107,9 @@ class CryptoRunner:
                 held_hours = data.get("held_hours", 0)
                 exit_price = data.get("exit_price", 0)
                 reason = data.get("reason", "")
+                mfe = data.get("mfe", 0)
+                mae = data.get("mae", 0)
+                capture_ratio = data.get("capture_ratio", 0)
 
                 # Accumulate realized PnL for portfolio value tracking
                 entry_px = self._entry_prices.get(ticker, data.get("entry_price", 0))
@@ -698,8 +1131,10 @@ class CryptoRunner:
                     dry_run = os.environ.get("LIVE_TRADING", "").lower() not in ("1", "true", "yes")
                     exit_qty = qty  # from event payload or tracked position
                     exit_value = exit_price * exit_qty if exit_qty > 0 else 0
+                    # Determine exit action label based on position side
+                    exit_action = "COVER" if (tracked_pos and tracked_pos.side == "short") else "SELL"
                     self._log_trade(
-                        "SELL", ticker, exit_price, exit_qty, exit_value,
+                        exit_action, ticker, exit_price, exit_qty, exit_value,
                         pnl_pct=pnl_pct, held_hours=held_hours,
                         reason=reason, source=f"safety_{source}",
                         dry_run=dry_run,
@@ -711,7 +1146,21 @@ class CryptoRunner:
                     crypto_result = await asyncio.to_thread(self.crypto_regime_detector.detect)
                     crypto_regime = crypto_result.get("regime_label", "unknown")
                     macro_regime = self.macro_detector.regime.value
-                    combined_regime = f"{crypto_regime}_{macro_regime}"
+                    # Trend direction from BTC 1h (same logic as snapshot builder)
+                    from core.agent_tools import _calc_ema, _calc_supertrend
+                    _exit_trend = "ranging"
+                    _btc_bars = self.ohlcv_store.get_bars("BTC/USDT:USDT", "1h", 200)
+                    if _btc_bars and len(_btc_bars) >= 21:
+                        _closes = [b[4] for b in _btc_bars if b[4] > 0]
+                        if len(_closes) >= 21:
+                            _ema9 = _calc_ema(_closes, 9)
+                            _ema21 = _calc_ema(_closes, 21)
+                            _st = _calc_supertrend(_btc_bars, period=10, multiplier=3.0)
+                            if _ema9 < _ema21 and _st < 0:
+                                _exit_trend = "downtrend"
+                            elif _ema9 > _ema21 and _st > 0:
+                                _exit_trend = "uptrend"
+                    combined_regime = f"{crypto_regime}_{_exit_trend}_{macro_regime}"
                 except Exception:
                     pass
 
@@ -723,21 +1172,34 @@ class CryptoRunner:
                                 and ev.get("payload", {}).get("ticker") == ticker):
                             agent_signals = ev["payload"].get("signals", {})
                             break
-                if agent_signals:
-                    # Pop entry metadata for Level 0 meta-parameter learning
-                    meta = self._entry_meta.pop(ticker, {})
+                # Use position_side from event payload FIRST (reliable: set before untrack).
+                # Fallback to tracked_pos (may be None if fire-and-forget handler runs late).
+                pos_side = data.get("position_side") or (tracked_pos.side if tracked_pos else "long")
+                # Pop entry metadata once (used by both record_trade and exit regret)
+                meta = self._entry_meta.pop(ticker, {})
+                ta_snap = meta.get("ta_snapshot", {})
+                # Build merged_signals unconditionally (needed by exit regret tracker)
+                # For safety exits: agent_signals={}, so merged = ta_snapshot only
+                merged_signals = dict(ta_snap)
+                merged_signals.update(agent_signals)
 
+                if merged_signals:
                     self.online_learner.record_trade(
                         ticker=ticker,
                         entry_price=data.get("entry_price", 0),
                         exit_price=exit_price,
                         pnl_pct=pnl_pct,
                         held_hours=held_hours,
-                        agent_signals=agent_signals,
+                        agent_signals=merged_signals,
                         market_type="crypto",
                         regime=combined_regime,
                         position_pct_used=meta.get("position_pct", 0.0),
                         confidence_at_entry=meta.get("confidence", 0.0),
+                        position_side=pos_side,
+                        ta_snapshot=None,  # already merged, no virtual needed
+                        mfe=mfe,
+                        mae=mae,
+                        capture_ratio=capture_ratio,
                     )
                 # Record to Neo4j for cross-session memory
                 try:
@@ -766,12 +1228,31 @@ class CryptoRunner:
                         exit_source=source,
                         agent_signals=agent_signals,
                         entry_context=entry_context,
+                        position_side=pos_side,
+                        mfe=mfe,
+                        mae=mae,
+                        capture_ratio=capture_ratio,
                     )
                 except Exception as exc:
                     logger.debug("[diary] Reflection failed: %s", exc)
 
-                # Cleanup entry_meta (may have been popped in agent_signals branch already)
-                self._entry_meta.pop(ticker, None)
+                # Post-exit counterfactual: track price after exit for regret learning
+                try:
+                    exit_snap = ExitSnapshot(
+                        ts=time.time(),
+                        ticker=ticker,
+                        exit_price=exit_price,
+                        entry_price=data.get("entry_price", 0),
+                        pnl_pct=pnl_pct,
+                        held_hours=held_hours,
+                        position_side=pos_side,
+                        agent_signals=dict(merged_signals),
+                        regime=combined_regime,
+                        exit_reason=reason,
+                    )
+                    self.exit_regret_tracker.record_exit(exit_snap)
+                except Exception as exc:
+                    logger.debug("[exit-regret] Record failed: %s", exc)
 
         self.event_bus.subscribe("position.exit", _on_exit)
 
@@ -780,61 +1261,98 @@ class CryptoRunner:
     # ------------------------------------------------------------------
 
     async def _handle_tick(self, payload: dict) -> None:
-        """Every WS tick → update aggregator → gate evaluates → wake Claude if needed."""
+        """Every WS tick → update aggregator → gate evaluates.
+
+        Two evaluation paths to balance data quality vs responsiveness:
+          1. Candle close: full features (price_change_pct, volume, btc_price)
+          2. Between candles: BTC ticks only → btc_price z-score (flash crash/pump)
+
+        This prevents z-score pollution (duplicates, zero-dominated windows)
+        while keeping standalone z-score wakes for extreme BTC moves.
+        """
         ticker = payload.get("ticker", "")
         price = payload.get("price", 0)
         interval = payload.get("interval", "")
         is_closed = payload.get("is_closed", False)
-        primary = EVENT_CONFIG.get("primary_interval", "15m")
 
         if price <= 0:
             return
+
+        # Always cache latest prices (position tracker, snapshot builder, etc.)
+        self._last_tick_prices[ticker] = price
+        if "BTC" in ticker:
+            self._last_tick_prices["_btc_price"] = price
 
         # Update multi-TF aggregator with closed candles (all intervals)
         if is_closed and interval:
             self.multi_tf_aggregator.update(ticker, interval, payload)
 
-        # Gate evaluation: 1m and 5m intervals (responsive trading)
-        # 15m+ only feeds aggregator, not gate (avoid z-score pollution from slow TFs)
-        _gate_intervals = {"1m", "5m", primary}
+        # Gate interval filter: 5m/15m + primary (1h close = full analysis)
+        primary = EVENT_CONFIG.get("primary_interval", "1h")
+        _gate_intervals = {"5m", "15m", primary}
         if interval and interval not in _gate_intervals:
             return
 
-        features = self._compute_tick_features(ticker, price, payload)
-        should_wake, reasons = self.adaptive_gate.evaluate(features, is_candle_close=is_closed)
-
-        if should_wake:
-            trigger = "candle_close" if is_closed else "gate"
-            logger.info("[runner] Gate wake (%s) -> Claude deciding", ", ".join(reasons))
-            try:
-                await self._run_decision(trigger=trigger, event=payload, wake_reasons=reasons)
-            except Exception as exc:
-                logger.error("[decide] Failed on gate wake: %s", exc)
+        if is_closed:
+            # Path 1: Candle close — full feature evaluation
+            # price_change_pct = close-to-close, volume = candle volume
+            features = self._compute_tick_features(ticker, price, payload)
+            should_wake, reasons = self.adaptive_gate.evaluate(
+                features, is_candle_close=True)
+            if should_wake:
+                logger.info("[runner] Gate wake (%s) -> Claude deciding",
+                            ", ".join(reasons))
+                try:
+                    await self._run_decision(
+                        trigger="candle_close", event=payload,
+                        wake_reasons=reasons)
+                except Exception as exc:
+                    logger.error("[decide] Failed on gate wake: %s",
+                                 exc, exc_info=True)
+        elif "BTC" in ticker:
+            # Path 2: Between candles — BTC price z-score only
+            # Only actual BTC ticks (no duplicates from ETH/SOL/PAXG cache)
+            # Catches flash crashes/pumps before next candle close
+            should_wake, reasons = self.adaptive_gate.evaluate(
+                {"btc_price": price}, is_candle_close=False)
+            if should_wake:
+                logger.info("[runner] Gate wake (%s) -> Claude deciding",
+                            ", ".join(reasons))
+                try:
+                    await self._run_decision(
+                        trigger="gate", event=payload,
+                        wake_reasons=reasons)
+                except Exception as exc:
+                    logger.error("[decide] Failed on gate wake: %s",
+                                 exc, exc_info=True)
 
     def _compute_tick_features(self, ticker: str, price: float, payload: dict) -> Dict[str, float]:
-        """Extract features from tick for gate evaluation.
+        """Extract features from candle close for gate evaluation.
 
-        Feature names are ticker-scoped (e.g. "BTC/USDT:price_change_pct") so
-        each asset gets its own z-score tracker.  Global features like btc_price
-        are shared across all tickers for wake-condition evaluation.
+        Called ONLY on candle close — each feature represents a real market
+        state change, not intermediate WS noise.
+
+        Key fixes vs previous tick-based approach:
+          - price_change_pct: close-to-close (not tick-to-tick with 90% zeros)
+          - btc_price: only from BTC ticks (not N duplicates from every ticker)
         """
         features: Dict[str, float] = {}
         prefix = ticker  # e.g. "BTC/USDT"
 
-        # Price change vs previous tick (per-ticker z-score)
-        prev_price = self._last_tick_prices.get(ticker, price)
-        if prev_price > 0:
-            features[f"{prefix}:price_change_pct"] = (price - prev_price) / prev_price
+        # Price change: candle-close to candle-close (not tick-to-tick)
+        prev_close = self._last_close_prices.get(ticker, price)
+        if prev_close > 0:
+            features[f"{prefix}:price_change_pct"] = (price - prev_close) / prev_close
         else:
             features[f"{prefix}:price_change_pct"] = 0.0
-        self._last_tick_prices[ticker] = price
+        self._last_close_prices[ticker] = price
 
-        # BTC price — always present (cached from last BTC tick)
+        # BTC price — only from actual BTC candle closes
+        # (prevents same cached value being fed N times per real change)
         if "BTC" in ticker:
-            self._last_tick_prices["_btc_price"] = price
-        features["btc_price"] = self._last_tick_prices.get("_btc_price", 0.0)
+            features["btc_price"] = price
 
-        # Volume (per-ticker z-score)
+        # Volume (per-ticker, meaningful on candle close)
         features[f"{prefix}:volume"] = payload.get("volume", 0.0)
 
         # Derivatives context (cached from DerivativesMonitor)
@@ -855,31 +1373,58 @@ class CryptoRunner:
 
     # _initial_balance: set in __init__ from broker.connect()
     _fg_cache: tuple = (0, 0, "")  # (timestamp, index, label)
-    _trending_cache: tuple = (0, "")  # (timestamp, summary)
+    _trending_cache: tuple = (0, "", 0.0)  # (timestamp, summary, buzz_score)
     _etf_flow_cache: Dict = {}
     _etf_flow_cache_time: float = 0.0
+    _btc_dom_cache: tuple = (0, 0.0)  # (timestamp, dominance_pct)
+    _news_sent_cache: tuple = (0, 0.0)  # (timestamp, sentiment_score)
+    _whale_cache: tuple = (0, 0.0)  # (timestamp, whale_score)
+    _exchange_flow_cache: tuple = (0, 0.0)  # (timestamp, netflow_score)
 
     def _estimate_portfolio_value(self) -> float:
         """Estimate portfolio value from WS prices (dry_run mode, no REST).
 
-        Includes cumulative realized PnL from closed trades so the equity
-        curve reflects actual performance, not just initial_balance.
+        Uses actual broker balance (synced every 10min) as base, falling back
+        to initial_balance + realized_pnl if broker fetch fails.
+
+        Side-aware:
+        - Long: cash -= entry_value, current_value = qty * current_px
+        - Short: cash -= margin (= entry_value), unrealized_pnl = (entry - current) * qty
+          → portfolio = base - margin + margin + unrealized_pnl = base + unrealized_pnl
         """
-        # Start from initial balance + realized gains/losses from closed trades
-        base = self._initial_balance + self._realized_pnl_usd
-        position_value = 0.0
+        # Sync broker balance every 10 minutes
+        now = time.time()
+        if now - self._broker_balance_time > 600:
+            try:
+                bal = self.broker._exchange.fetch_balance()
+                total = bal.get("total", {})
+                usdt = float(total.get("USDT", 0))
+                usdc = float(total.get("USDC", 0))
+                broker_bal = usdt + usdc
+                if broker_bal > 0:
+                    self._broker_balance = broker_bal
+                    self._broker_balance_time = now
+                    logger.info("[portfolio] Synced broker balance: $%.2f (USDT=%.2f, USDC=%.2f)", broker_bal, usdt, usdc)
+            except Exception as exc:
+                logger.debug("[portfolio] Broker balance fetch failed: %s", exc)
+
+        # Use broker balance if available, otherwise fallback to internal tracking
+        if self._broker_balance > 0:
+            base = self._broker_balance
+        else:
+            base = self._initial_balance + self._realized_pnl_usd
+        unrealized_pnl = 0.0
         for tic, entry_px in self._entry_prices.items():
             tracked = self.position_tracker.get_position(tic)
             if tracked and tracked.qty > 0:
-                current_px = self._last_tick_prices.get(tic, entry_px)
-                position_value += tracked.qty * current_px
-        # Cash = base - (sum of position values at entry)
-        invested = sum(
-            self.position_tracker.get_position(tic).qty * entry_px
-            for tic, entry_px in self._entry_prices.items()
-            if self.position_tracker.get_position(tic)
-        )
-        return base - invested + position_value
+                current_px = tracked.current_price if tracked.current_price > 0 else self._last_tick_prices.get(tic, entry_px)
+                if tracked.side == "short":
+                    # Short PnL: profit when price drops
+                    unrealized_pnl += (entry_px - current_px) * tracked.qty
+                else:
+                    # Long PnL: profit when price rises
+                    unrealized_pnl += (current_px - entry_px) * tracked.qty
+        return base + unrealized_pnl
 
     def _fetch_fear_greed(self) -> tuple:
         """Fetch Fear & Greed Index from alternative.me. Cached for 1 hour."""
@@ -898,18 +1443,24 @@ class CryptoRunner:
             logger.debug("[data] Fear & Greed fetch failed: %s", exc)
             return self._fg_cache[1], self._fg_cache[2]
 
-    def _fetch_trending(self) -> str:
-        """Fetch CoinGecko trending coins as market buzz. Cached for 1 hour."""
+    def _fetch_trending(self) -> tuple:
+        """Fetch CoinGecko trending coins as market buzz + social_buzz score. Cached for 1 hour.
+
+        Returns (summary_text, buzz_score).
+        buzz_score: average |price_change_24h| of top 5 trending coins.
+        High buzz_score = market excitement, low = calm.
+        """
         import requests
         now = time.time()
         if now - self._trending_cache[0] < 3600 and self._trending_cache[1]:
-            return self._trending_cache[1]
+            return self._trending_cache[1], self._trending_cache[2]
         try:
             resp = requests.get("https://api.coingecko.com/api/v3/search/trending", timeout=5)
             coins = resp.json().get("coins", [])[:5]
             if not coins:
-                return self._trending_cache[1]
+                return self._trending_cache[1], self._trending_cache[2]
             parts = []
+            price_changes = []
             for c in coins:
                 item = c.get("item", {})
                 name = item.get("name", "")
@@ -918,17 +1469,26 @@ class CryptoRunner:
                 price_change = item.get("data", {}).get("price_change_percentage_24h", {}).get("usd", 0)
                 if price_change:
                     parts.append(f"#{rank} {symbol}({name}) {price_change:+.1f}%")
+                    price_changes.append(price_change)
                 else:
                     parts.append(f"#{rank} {symbol}({name})")
             summary = "Trending: " + ", ".join(parts)
-            self._trending_cache = (now, summary)
-            return summary
+            # Buzz score: avg absolute price change of trending coins
+            # High = market is excited (trending coins moving a lot)
+            buzz_score = sum(abs(p) for p in price_changes) / len(price_changes) if price_changes else 0.0
+            self._trending_cache = (now, summary, buzz_score)
+            return summary, buzz_score
         except Exception as exc:
             logger.debug("[data] Trending fetch failed: %s", exc)
-            return self._trending_cache[1]
+            return self._trending_cache[1], self._trending_cache[2]
 
     def _fetch_etf_flow(self) -> Dict:
-        """Fetch BTC ETF daily flow from CoinGlass public API. Cached for 4 hours."""
+        """Estimate ETF-like institutional flow via Binance spot volume anomaly.
+
+        ETF inflows correlate with unusually high spot volume relative to recent
+        average. Uses Binance BTC/USDT spot 24h volume vs 7-day average.
+        Cached for 4 hours.
+        """
         import requests
         now = time.time()
         if now - self._etf_flow_cache_time < 14400 and self._etf_flow_cache:
@@ -936,38 +1496,175 @@ class CryptoRunner:
 
         result = {"daily_flow_usd": 0.0, "weekly_flow_usd": 0.0, "label": "neutral"}
         try:
+            # Get current 24h volume
             resp = requests.get(
-                "https://open-api.coinglass.com/public/v2/indicator/etf_flow_total",
-                timeout=10,
+                "https://api.binance.com/api/v3/ticker/24hr",
+                params={"symbol": "BTCUSDT"},
+                timeout=5,
             )
-            data = resp.json()
-            if data.get("code") == "0" and data.get("data"):
-                rows = data["data"]
-                if rows:
-                    latest = rows[-1] if isinstance(rows, list) else rows
-                    daily = float(latest.get("totalFlow", 0) or latest.get("value", 0) or 0)
-                    # Weekly: sum last 5 entries (trading days)
-                    if isinstance(rows, list) and len(rows) >= 5:
-                        weekly = sum(float(r.get("totalFlow", 0) or r.get("value", 0) or 0) for r in rows[-5:])
-                    else:
-                        weekly = daily
+            if resp.status_code != 200:
+                return self._etf_flow_cache or result
+            current_vol = float(resp.json().get("quoteVolume", 0))
 
-                    if daily > 1e6:
+            # Get 7-day klines for average daily volume
+            klines = requests.get(
+                "https://api.binance.com/api/v3/klines",
+                params={"symbol": "BTCUSDT", "interval": "1d", "limit": 8},
+                timeout=5,
+            )
+            if klines.status_code == 200:
+                bars = klines.json()
+                if len(bars) >= 2:
+                    # Use bars[:-1] as historical (exclude current incomplete day)
+                    hist_vols = [float(b[7]) for b in bars[:-1]]  # quoteAssetVolume
+                    avg_vol = sum(hist_vols) / len(hist_vols) if hist_vols else current_vol
+                    vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
+
+                    # Convert volume ratio to "flow" estimate
+                    # ratio > 1.2 = above-average volume = institutional inflow proxy
+                    # ratio < 0.8 = below-average = outflow/reduced interest
+                    excess_usd = (vol_ratio - 1.0) * avg_vol  # excess in USD
+                    daily_flow = excess_usd if abs(vol_ratio - 1.0) > 0.05 else 0.0
+
+                    if daily_flow > 1e8:
                         label = "inflow"
-                    elif daily < -1e6:
+                    elif daily_flow < -1e8:
                         label = "outflow"
                     else:
                         label = "neutral"
 
-                    result = {"daily_flow_usd": daily, "weekly_flow_usd": weekly, "label": label}
-            else:
-                logger.debug("[data] ETF flow API returned code=%s", data.get("code"))
+                    result = {
+                        "daily_flow_usd": daily_flow,
+                        "weekly_flow_usd": daily_flow,
+                        "label": label,
+                        "vol_ratio": round(vol_ratio, 3),
+                    }
         except Exception as exc:
-            logger.debug("[data] ETF flow fetch failed: %s", exc)
+            logger.debug("[data] ETF flow proxy fetch failed: %s", exc)
 
         self._etf_flow_cache = result
         self._etf_flow_cache_time = now
         return result
+
+    def _fetch_btc_dominance(self) -> float:
+        """Fetch BTC dominance % from CoinGecko /global. Cached for 1 hour. Free, no key."""
+        import requests
+        now = time.time()
+        if now - self._btc_dom_cache[0] < 3600 and self._btc_dom_cache[1] > 0:
+            return self._btc_dom_cache[1]
+        try:
+            resp = requests.get("https://api.coingecko.com/api/v3/global", timeout=5)
+            data = resp.json().get("data", {})
+            btc_d = data.get("market_cap_percentage", {}).get("btc", 0.0)
+            if btc_d > 0:
+                self._btc_dom_cache = (now, btc_d)
+            return btc_d
+        except Exception as exc:
+            logger.debug("[data] BTC dominance fetch failed: %s", exc)
+            return self._btc_dom_cache[1]
+
+    def _fetch_news_sentiment(self) -> float:
+        """Fetch crypto news sentiment from CryptoCompare API. Cached for 1 hour.
+
+        Returns sentiment score [-1, +1]. Positive = bullish headlines.
+        """
+        import requests
+        now = time.time()
+        if now - self._news_sent_cache[0] < 3600:
+            return self._news_sent_cache[1]
+        try:
+            resp = requests.get(
+                "https://min-api.cryptocompare.com/data/v2/news/",
+                params={"lang": "EN"},
+                timeout=5,
+            )
+            data = resp.json() if resp.status_code == 200 else {}
+            articles = data.get("Data", [])
+            if not articles or not isinstance(articles, list):
+                return self._news_sent_cache[1]
+            # Simple sentiment: count positive/negative keywords in titles
+            pos_words = {"surge", "rally", "bull", "soar", "gain", "rise", "jump", "high", "up", "breakout", "pump", "buy"}
+            neg_words = {"crash", "drop", "bear", "fall", "dump", "low", "down", "sell", "fear", "plunge", "risk", "loss"}
+            pos, neg = 0, 0
+            for art in articles[:30]:
+                title = (art.get("title", "") or "").lower()
+                pos += sum(1 for w in pos_words if w in title)
+                neg += sum(1 for w in neg_words if w in title)
+            total = pos + neg
+            score = (pos - neg) / total if total > 0 else 0.0
+            self._news_sent_cache = (now, score)
+            return score
+        except Exception as exc:
+            logger.debug("[data] News sentiment fetch failed: %s", exc)
+            return self._news_sent_cache[1]
+
+    def _fetch_whale_activity(self) -> float:
+        """Detect large BTC transactions via blockchain.info mempool. Cached for 4 hours.
+
+        Returns whale score [0, +1]. Higher = more large tx activity.
+        Free, no API key, no rate limit issues.
+        """
+        import requests
+        now = time.time()
+        if now - self._whale_cache[0] < 14400:
+            return self._whale_cache[1]
+        try:
+            resp = requests.get(
+                "https://blockchain.info/unconfirmed-transactions",
+                params={"format": "json"},
+                timeout=10,
+            )
+            txs = resp.json().get("txs", []) if resp.status_code == 200 else []
+            if not txs:
+                return self._whale_cache[1]
+            # Count large transactions (>1 BTC output total in satoshi)
+            large_count = sum(
+                1 for tx in txs
+                if sum(o.get("value", 0) for o in tx.get("out", [])) > 100_000_000  # >1 BTC
+            )
+            # Score: 0-20+ large txs in recent mempool → 0.0-1.0
+            score = min(1.0, large_count / 10.0)
+            self._whale_cache = (now, score)
+            return score
+        except Exception as exc:
+            logger.debug("[data] Whale activity fetch failed: %s", exc)
+            return self._whale_cache[1]
+
+    def _fetch_exchange_netflow(self) -> float:
+        """Estimate exchange netflow via Binance futures/spot volume ratio.
+
+        High futures/spot ratio = speculative activity = coins on exchange (bearish).
+        Low ratio = spot accumulation = coins leaving exchange (bullish).
+        Cached for 4 hours.
+        """
+        import requests
+        now = time.time()
+        if now - self._exchange_flow_cache[0] < 14400:
+            return self._exchange_flow_cache[1]
+        try:
+            r_spot = requests.get(
+                "https://api.binance.com/api/v3/ticker/24hr",
+                params={"symbol": "BTCUSDT"}, timeout=5,
+            )
+            r_fut = requests.get(
+                "https://fapi.binance.com/fapi/v1/ticker/24hr",
+                params={"symbol": "BTCUSDT"}, timeout=5,
+            )
+            if r_spot.status_code == 200 and r_fut.status_code == 200:
+                spot_vol = float(r_spot.json().get("quoteVolume", 1))
+                fut_vol = float(r_fut.json().get("quoteVolume", 1))
+                ratio = fut_vol / max(spot_vol, 1e6)
+                # Normal ratio ~5-8. >10 = heavy speculation (bearish), <4 = spot driven (bullish)
+                # Center around 7, normalize
+                score = max(-1.0, min(1.0, (ratio - 7.0) / 5.0))
+                # Positive score = more futures activity = bearish netflow (coins on exchange)
+                # Negative score = more spot activity = bullish (accumulation)
+                self._exchange_flow_cache = (now, score)
+                return score
+            return self._exchange_flow_cache[1]
+        except Exception as exc:
+            logger.debug("[data] Exchange netflow proxy fetch failed: %s", exc)
+            return self._exchange_flow_cache[1]
 
     async def _bootstrap_ohlcv(self) -> None:
         """One-time REST call to load historical OHLCV into the WS store.
@@ -1048,7 +1745,22 @@ class CryptoRunner:
             # Real-time WS price first, candle close as fallback
             ws_price = self._last_tick_prices.get(tic, 0)
             ohlcv_price = float(series.iloc[-1]) if len(series) >= 1 else 0
-            ticker_prices[tic] = ws_price if ws_price > 0 else ohlcv_price
+
+            # Cross-validate WS vs OHLCV — reject corrupted WS price
+            if ws_price > 0 and ohlcv_price > 0:
+                divergence = abs(ws_price - ohlcv_price) / ohlcv_price
+                if divergence > 0.05:  # >5% divergence = WS price likely corrupted
+                    logger.warning(
+                        "[snapshot] PRICE DIVERGENCE %s: WS=%.2f OHLCV=%.2f (%.1f%%) — using OHLCV",
+                        tic, ws_price, ohlcv_price, divergence * 100,
+                    )
+                    ticker_prices[tic] = ohlcv_price  # trust candle close over corrupted WS
+                else:
+                    ticker_prices[tic] = ws_price  # normal: use real-time WS
+            elif ws_price > 0:
+                ticker_prices[tic] = ws_price
+            else:
+                ticker_prices[tic] = ohlcv_price
             # Returns use candle close — correct lookback for actual timeframe
             if len(series) > bars_4h:
                 ticker_returns_4h[tic] = (float(series.iloc[-1]) / float(series.iloc[-1 - bars_4h])) - 1
@@ -1069,32 +1781,50 @@ class CryptoRunner:
         else:
             btc_1h = 0.0
 
-        # Derivatives
-        deriv = self._derivatives_context or self.derivatives_monitor.get_context()
+        # Derivatives — expire stale context (>5 min old)
+        deriv = self._derivatives_context
+        if deriv:
+            ctx_age = time.time() - deriv.get("_ts", 0)
+            if ctx_age > 300:  # >5 min
+                logger.debug("[snapshot] Derivatives context expired (%.0fs old), refreshing", ctx_age)
+                deriv = self.derivatives_monitor.get_context()
+        else:
+            deriv = self.derivatives_monitor.get_context()
 
         # Regime + sentiment — all independent, run in parallel
-        (crypto_result, macro_regime, (fg_index, fg_label), trending_summary, etf_flow) = await asyncio.gather(
-            asyncio.to_thread(self.crypto_regime_detector.detect),
-            asyncio.to_thread(self.macro_detector.detect),
-            asyncio.to_thread(self._fetch_fear_greed),
-            asyncio.to_thread(self._fetch_trending),
-            asyncio.to_thread(self._fetch_etf_flow),
+        _gather_results = await asyncio.gather(
+            asyncio.to_thread(self.crypto_regime_detector.detect),   # [0]
+            asyncio.to_thread(self.macro_detector.detect),           # [1]
+            asyncio.to_thread(self._fetch_fear_greed),               # [2]
+            asyncio.to_thread(self._fetch_trending),                 # [3]
+            asyncio.to_thread(self._fetch_etf_flow),                 # [4]
+            asyncio.to_thread(self._fetch_btc_dominance),            # [5]
+            asyncio.to_thread(self._fetch_news_sentiment),           # [6]
+            asyncio.to_thread(self._fetch_whale_activity),           # [7]
+            asyncio.to_thread(self._fetch_exchange_netflow),         # [8]
+            return_exceptions=True,
         )
+        # Safely unpack — use defaults if any sub-task failed
+        crypto_result = _gather_results[0] if not isinstance(_gather_results[0], Exception) else {"regime_label": "unknown"}
+        macro_regime = _gather_results[1] if not isinstance(_gather_results[1], Exception) else type("R", (), {"value": "unknown"})()
+        fg_result = _gather_results[2] if not isinstance(_gather_results[2], Exception) else (0, "")
+        fg_index, fg_label = fg_result if isinstance(fg_result, tuple) else (0, "")
+        trending_result = _gather_results[3] if not isinstance(_gather_results[3], Exception) else ("", 0.0)
+        trending_summary, social_buzz_score = trending_result if isinstance(trending_result, tuple) else (trending_result or "", 0.0)
+        etf_flow = _gather_results[4] if not isinstance(_gather_results[4], Exception) else {}
+        btc_dominance = _gather_results[5] if not isinstance(_gather_results[5], (Exception, type(None))) else 0.0
+        news_sentiment = _gather_results[6] if not isinstance(_gather_results[6], (Exception, type(None))) else 0.0
+        whale_activity = _gather_results[7] if not isinstance(_gather_results[7], (Exception, type(None))) else 0.0
+        exchange_netflow = _gather_results[8] if not isinstance(_gather_results[8], (Exception, type(None))) else 0.0
+        # Log failures
+        for _i, _r in enumerate(_gather_results):
+            if isinstance(_r, Exception):
+                logger.warning("[snapshot] gather task %d failed: %s", _i, _r)
         crypto_regime = crypto_result.get("regime_label", "unknown")
-        combined_regime = f"{crypto_regime}_{macro_regime.value}"
+        macro_ctx = self.macro_detector.get_context()
 
-        # H-TS posteriors — feed into Claude's context
-        ts_mean_weights = self.online_learner.get_mean_weights(regime=combined_regime)
-        ts_group_weights = self.online_learner.get_group_weights(regime=combined_regime)
-        ts_meta_params = self.online_learner.get_meta_param_means(regime=combined_regime)
+        # H-TS sampling deferred to after TA computation (trend-aware regime at line ~1922)
         learner_status = self.online_learner.get_status()
-
-        ts_regime_info = ""
-        regime_data = learner_status.get("regime_info", {}).get(combined_regime, {})
-        if regime_data.get("using_own_weights"):
-            ts_regime_info = f"Regime '{combined_regime}' has {regime_data['trade_count']} trades — using regime-specific weights"
-        else:
-            ts_regime_info = f"Regime '{combined_regime}' has <3 trades — using global weights as fallback"
 
         # Recent trades
         recent_trades = learner_status.get("recent_trades", [])
@@ -1104,15 +1834,24 @@ class CryptoRunner:
         for tic, pos in positions.items():
             current_px = ticker_prices.get(tic, 0) or self._last_tick_prices.get(tic, 0)
             entry_px = pos.get("entry_price", 0)
-            gross_pnl = (current_px / entry_px - 1) if entry_px > 0 else 0
-            pnl_pct = gross_pnl - ROUND_TRIP_FEE  # net after fees
             tracked = self.position_tracker.get_position(tic)
+            # Side-aware PnL
+            if tracked and tracked.side == "short":
+                gross_pnl = (entry_px - current_px) / entry_px if entry_px > 0 else 0
+            else:
+                gross_pnl = (current_px / entry_px - 1) if entry_px > 0 else 0
+            pnl_pct = gross_pnl - ROUND_TRIP_FEE  # net after fees
             enriched_positions[tic] = {
                 **pos,
+                "side": tracked.side if tracked else "long",
                 "current_price": current_px,
                 "pnl_pct": pnl_pct,
                 "trailing_high": tracked.trailing_high if tracked else current_px,
+                "trailing_low": tracked.trailing_low if tracked else current_px,
                 "held_hours": tracked.held_hours if tracked else 0,
+                "mfe": tracked.mfe if tracked else 0,
+                "mae": tracked.mae if tracked else 0,
+                "capture_ratio": tracked.capture_ratio if tracked else 0,
             }
 
         # Cash
@@ -1133,6 +1872,7 @@ class CryptoRunner:
         from core.agent_tools import (
             _calc_rsi, _calc_stoch_rsi, _calc_macd,
             _calc_ema, _calc_bollinger, _calc_atr, _calc_vwap,
+            _calc_supertrend, _calc_mfi, _calc_obv_direction,
         )
         pre_computed_ta: Dict[str, Dict] = {}
         for tic in candidates:
@@ -1170,10 +1910,69 @@ class CryptoRunner:
                     ind["atr_trail"] = round(1.0 * atr_pct_val, 6)
                     ind["fee_atr_ratio"] = round(0.001 / atr_pct_val, 3)
                 ind["vwap"] = _calc_vwap(bars, n=50)
+                # EMA(50) for ema_cross_slow signal
+                ind["ema_50"] = round(_calc_ema(closes, 50), 2) if len(closes) >= 50 else None
+                # Supertrend (ATR×3 based)
+                ind["supertrend_dir"] = _calc_supertrend(bars, period=10, multiplier=3.0)
+                # MFI (Money Flow Index)
+                ind["mfi"] = round(_calc_mfi(bars, period=14), 2)
+                # OBV direction (10-bar divergence)
+                volumes = [b[5] for b in bars if b[5] >= 0]
+                ind["obv_direction"] = _calc_obv_direction(closes, volumes, lookback=10)
+                # Volume ratio (current bar vs 20-bar avg)
+                if len(volumes) >= 20 and volumes[-1] > 0:
+                    avg_vol = sum(volumes[-20:]) / 20
+                    ind["volume"] = {"ratio": round(volumes[-1] / avg_vol, 3) if avg_vol > 0 else 1.0}
                 ind["last_close"] = round(closes[-1], 2)
+                # Sparkline data: last 20 close prices + RSI(14) trajectory
+                # (Agent Trading Arena, EMNLP 2025 — LLMs reason better with visual patterns)
+                _spark_n = 20
+                ind["recent_closes"] = [round(c, 2) for c in closes[-_spark_n:]]
+                if len(closes) >= 14 + _spark_n:
+                    # O(N) single-pass RSI trajectory (was O(N²) calling _calc_rsi 20x)
+                    _period = 14
+                    _deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+                    _ag = sum(max(d, 0) for d in _deltas[:_period]) / _period
+                    _al = sum(max(-d, 0) for d in _deltas[:_period]) / _period
+                    _emit_start = len(_deltas) - _spark_n
+                    _rsi_hist = []
+                    for _j, _d in enumerate(_deltas[_period:], start=_period):
+                        _ag = (_ag * (_period - 1) + max(_d, 0)) / _period
+                        _al = (_al * (_period - 1) + max(-_d, 0)) / _period
+                        if _j >= _emit_start:
+                            _rval = 100.0 if _al == 0 else 100.0 - 100.0 / (1.0 + _ag / _al)
+                            _rsi_hist.append(round(_rval, 1))
+                    if _rsi_hist:
+                        ind["rsi_history"] = _rsi_hist
                 tic_ta[interval] = ind
             if tic_ta:
                 pre_computed_ta[tic] = tic_ta
+
+        # Trend direction from BTC 1h TA → inject into combined_regime
+        # This lets H-TS learn separate strategies for uptrend vs downtrend
+        btc_1h_ta = pre_computed_ta.get("BTC/USDT:USDT", {}).get("1h", {})
+        btc_ema_status = btc_1h_ta.get("ema_cross", {}).get("status", "unknown")
+        btc_st_dir = btc_1h_ta.get("supertrend_dir", 0)
+        if btc_ema_status == "bearish" and btc_st_dir < 0:
+            trend_dir = "downtrend"
+        elif btc_ema_status == "bullish" and btc_st_dir > 0:
+            trend_dir = "uptrend"
+        else:
+            trend_dir = "ranging"
+        combined_regime = f"{crypto_regime}_{trend_dir}_{macro_regime.value}"
+        self._last_combined_regime = combined_regime
+        # Re-sample H-TS with trend-aware regime (more granular learning)
+        ts_mean_weights = self.online_learner.get_signal_reliability(regime=combined_regime)
+        ts_group_weights = self.online_learner.get_group_weights(regime=combined_regime)
+        ts_meta_params = self.online_learner.sample_meta_params(regime=combined_regime)
+
+        # Regime info for prompt
+        ts_regime_info = ""
+        regime_data = learner_status.get("regime_info", {}).get(combined_regime, {})
+        if regime_data.get("using_own_weights"):
+            ts_regime_info = f"Regime '{combined_regime}' has {regime_data['trade_count']} trades — using regime-specific weights"
+        else:
+            ts_regime_info = f"Regime '{combined_regime}' has <3 trades — using global weights as fallback"
 
         # Historical insights from Neo4j (non-blocking)
         historical_insights = ""
@@ -1192,18 +1991,55 @@ class CryptoRunner:
         except Exception:
             pass
 
+        # Liquidation heatmap context (per-ticker, from LiquidationTracker)
+        liq_contexts: Dict[str, Dict] = {}
+        for tic in candidates:
+            oi_data = deriv.get("open_interest", {}).get(tic, {})
+            oi_usd = oi_data.get("value", 0) if isinstance(oi_data, dict) else 0
+            funding = deriv.get("funding_rates", {}).get(tic, 0)
+            current_px = ticker_prices.get(tic, 0)
+            if current_px > 0:
+                liq_contexts[tic] = self.liquidation_tracker.get_context(
+                    tic, current_px, oi_usd, funding,
+                )
+
+        # OOD detection: score each candidate's TA features
+        ood_scores: Dict[str, float] = {}
+        for tic in candidates:
+            ta_signals = self._extract_ta_signals(tic, MarketSnapshot(
+                ticker_prices=ticker_prices,
+                pre_computed_ta=pre_computed_ta,
+                funding_rates=deriv.get("funding_rates", {}),
+                open_interest=deriv.get("open_interest", {}),
+                long_short_ratio=deriv.get("long_short_ratio", {}),
+                basis_spreads={
+                    t: info["basis_annualized"]
+                    for t, info in deriv.get("basis_spread", {}).items()
+                    if "basis_annualized" in info
+                },
+                candidates=candidates,
+            ))
+            if ta_signals:
+                self.ood_detector.update(ta_signals)
+                is_ood, dist = self.ood_detector.is_ood(ta_signals)
+                if dist > 0:
+                    ood_scores[tic] = round(dist, 2)
+                if is_ood:
+                    logger.info("[ood] %s: Mahalanobis=%.2f (OOD)", tic, dist)
+
         # Safety config for dynamic prompt generation (no hardcoded values in prompt)
         from config import CRYPTO_RISK_CONFIG
         safety_config = {
-            "stop_loss_pct": CRYPTO_RISK_CONFIG.get("stop_loss_pct", -0.007),
-            "take_profit_pct": CRYPTO_RISK_CONFIG.get("take_profit_pct", 0.008),
-            "max_hold_hours": CRYPTO_RISK_CONFIG.get("max_hold_hours", 0.75),
+            # Fallback defaults match current catastrophic policy
+            "stop_loss_pct": CRYPTO_RISK_CONFIG.get("stop_loss_pct", -0.05),
+            "take_profit_pct": CRYPTO_RISK_CONFIG.get("take_profit_pct", 0.05),
+            "max_hold_hours": CRYPTO_RISK_CONFIG.get("max_hold_hours", 4.0),
             "max_position_pct": CRYPTO_RISK_CONFIG.get("max_position_pct", 0.15),
             "max_exposure_pct": CRYPTO_RISK_CONFIG.get("max_exposure_pct", 0.60),
-            "dca_stop_loss_pct": CRYPTO_RISK_CONFIG.get("dca_stop_loss_pct", -0.015),
-            "dca_max_hold_hours": CRYPTO_RISK_CONFIG.get("dca_max_hold_hours", 2.0),
-            "scalp_trail_activation_pct": CRYPTO_RISK_CONFIG.get("scalp_trail_activation_pct", 0.004),
-            "scalp_trail_width_pct": CRYPTO_RISK_CONFIG.get("scalp_trail_width_pct", 0.002),
+            "dca_stop_loss_pct": CRYPTO_RISK_CONFIG.get("dca_stop_loss_pct", -0.05),
+            "dca_max_hold_hours": CRYPTO_RISK_CONFIG.get("dca_max_hold_hours", 4.0),
+            "scalp_trail_activation_pct": CRYPTO_RISK_CONFIG.get("scalp_trail_activation_pct", 0.02),
+            "scalp_trail_width_pct": CRYPTO_RISK_CONFIG.get("scalp_trail_width_pct", 0.01),
             "trail_activation_pct": cfg.get("trail_activation_pct", 0.04),
             "trail_pct": cfg.get("trail_pct", 0.06),
             "round_trip_fee": ROUND_TRIP_FEE,
@@ -1236,14 +2072,14 @@ class CryptoRunner:
             combined_regime=combined_regime,
             macro_exposure_scale=self.macro_detector.exposure_scale,
             macro_trail_multiplier=self.macro_detector.trail_multiplier,
-            # Macro indicators (FRED + DXY)
-            dxy=self.macro_detector.get_context().get("dxy", 0.0) or 0.0,
-            dxy_direction=self.macro_detector.get_context().get("dxy_direction", "unknown"),
-            dxy_1m_pct=self.macro_detector.get_context().get("dxy_1m_pct", 0.0) or 0.0,
-            net_liquidity_direction=self.macro_detector.get_context().get("net_liquidity_direction", "unknown"),
-            net_liquidity_delta_pct=self.macro_detector.get_context().get("net_liquidity_delta_pct", 0.0) or 0.0,
-            financial_stress=self.macro_detector.get_context().get("financial_stress", "unknown"),
-            nfci=self.macro_detector.get_context().get("nfci", 0.0) or 0.0,
+            # Macro indicators (FRED + DXY) — cache get_context() (was 7 separate calls)
+            dxy=macro_ctx.get("dxy", 0.0) or 0.0,
+            dxy_direction=macro_ctx.get("dxy_direction", "unknown"),
+            dxy_1m_pct=macro_ctx.get("dxy_1m_pct", 0.0) or 0.0,
+            net_liquidity_direction=macro_ctx.get("net_liquidity_direction", "unknown"),
+            net_liquidity_delta_pct=macro_ctx.get("net_liquidity_delta_pct", 0.0) or 0.0,
+            financial_stress=macro_ctx.get("financial_stress", "unknown"),
+            nfci=macro_ctx.get("nfci", 0.0) or 0.0,
             ts_mean_weights=ts_mean_weights,
             ts_group_weights=ts_group_weights,
             ts_meta_params=ts_meta_params,
@@ -1261,10 +2097,17 @@ class CryptoRunner:
             news_summary=trending_summary,
             etf_daily_flow_usd=etf_flow.get("daily_flow_usd", 0.0),
             etf_flow_label=etf_flow.get("label", ""),
+            btc_dominance_pct=btc_dominance if isinstance(btc_dominance, (int, float)) else 0.0,
+            social_buzz_score=social_buzz_score if isinstance(social_buzz_score, (int, float)) else 0.0,
+            news_sentiment_score=news_sentiment if isinstance(news_sentiment, (int, float)) else 0.0,
+            whale_activity_score=whale_activity if isinstance(whale_activity, (int, float)) else 0.0,
+            exchange_netflow_score=exchange_netflow if isinstance(exchange_netflow, (int, float)) else 0.0,
             multi_tf_summary=multi_tf_summary,
             pre_computed_ta=pre_computed_ta,
             historical_insights=historical_insights,
             diary_context=diary_context,
+            liquidation_contexts=liq_contexts,
+            ood_scores=ood_scores,
         )
 
     # ------------------------------------------------------------------
@@ -1280,8 +2123,20 @@ class CryptoRunner:
             if not self.broker.is_connected:
                 return
 
+            # WS warmup check — block decisions until we have live prices
+            cfg = ACTIVE_BLEND_CONFIG
+            missing_tickers = [t for t in cfg["tickers"] if t not in self._last_tick_prices]
+            if missing_tickers:
+                logger.warning(
+                    "[decide] WS not warmed up — missing prices for %s, skipping decision",
+                    missing_tickers,
+                )
+                return
+
             # Counterfactual learning: check old HOLD snapshots for missed opportunities
             self._check_counterfactuals()
+            # Post-exit counterfactual: check if we exited too early or at right time
+            self._check_exit_regrets()
 
             logger.info("[decide] Collecting data (trigger=%s)...", trigger)
             close_df = await asyncio.to_thread(self._fetch_ohlcv_df)
@@ -1302,6 +2157,7 @@ class CryptoRunner:
                         positions[tic] = {
                             "qty": tracked.qty,
                             "entry_price": entry_px,
+                            "side": tracked.side,
                         }
             else:
                 # Live: use real broker data
@@ -1336,8 +2192,25 @@ class CryptoRunner:
                 )
 
                 # Save agent memory (truncate to 500 chars)
+                # Only update memory if decisions led to actual trades or pure HOLD.
+                # When Claude hallucinates SELL/COVER that gets filtered, don't save
+                # the stale memory — it perpetuates the hallucination loop.
                 mem = agent_result.get("memory_update", "")
-                self._agent_memory = mem[:500] if mem else self._agent_memory
+                if mem:
+                    raw_decisions = agent_result.get("decisions", [])
+                    had_filtered_sells = any(
+                        d.get("action", "").upper() in ("SELL", "COVER")
+                        for d in raw_decisions
+                    ) and not decisions  # all got filtered
+                    if had_filtered_sells and not self._entry_prices:
+                        # Force clear memory to break SELL hallucination loop
+                        logger.info("[decide] Filtered SELL/COVER with no positions — resetting memory")
+                        self._agent_memory = "[NO POSITIONS OPEN] Cash only. 신규 BUY/SHORT만 가능."
+                    else:
+                        open_tickers = list(self._entry_prices.keys())
+                        if not open_tickers:
+                            mem = "[NO POSITIONS OPEN] " + mem
+                        self._agent_memory = mem[:500]
 
                 # Record learning insight to Neo4j
                 learning_note = agent_result.get("learning_note", "")
@@ -1347,11 +2220,11 @@ class CryptoRunner:
                     except Exception:
                         pass
             else:
-                # Fallback: rule-based pipeline (degraded mode)
-                logger.warning("[decide] Claude unavailable — using rule-based fallback")
-                decisions = await self._run_fallback_pipeline(close_df, positions, pv, snapshot, trigger)
-                # Set conservative gate schedule on fallback
-                self.adaptive_gate.update_from_claude(next_check_seconds=3600)
+                # Claude unavailable — do NOTHING (no fallback trading)
+                logger.warning("[decide] Claude unavailable — skipping (no fallback trades)")
+                decisions = []
+                # Retry sooner (5 min) instead of waiting 1h
+                self.adaptive_gate.update_from_claude(next_check_seconds=300)
 
             # Log decision context (always, even if no trades)
             self._log_decision(trigger, snapshot, agent_result, decisions)
@@ -1438,6 +2311,7 @@ class CryptoRunner:
                         self._entry_meta[ticker] = {
                             "position_pct": d.get("position_size_usd", 0) / pv_at_entry,
                             "confidence": d.get("confidence", 0),
+                            "ta_snapshot": self._extract_ta_signals(ticker, snapshot),
                         }
                         qty = d.get("position_size_usd", 0) / d["price"] if d["price"] > 0 else 0
                         if qty > 0:
@@ -1448,6 +2322,7 @@ class CryptoRunner:
                                 qty=qty,
                                 market_type="crypto",
                                 regime=snapshot.combined_regime,
+                                side="long",
                             )
                         await self.event_bus.publish("decision.signal", {
                             "ticker": ticker,
@@ -1474,8 +2349,34 @@ class CryptoRunner:
                             self._entry_prices.pop(ticker, None)
                             continue
 
+                        # === PRICE SANITY GUARD ===
+                        # Cross-validate snapshot price against tracker's live price
+                        # Prevents phantom PnL from corrupted/stale WS data
                         entry_px = self._entry_prices.get(ticker, d["price"])
-                        gross_pnl = (d["price"] - entry_px) / entry_px if entry_px > 0 else 0
+                        tracker_px = tracked.current_price
+                        if tracker_px > 0 and entry_px > 0:
+                            # Side-aware PnL comparison
+                            if tracked.side == "short":
+                                snapshot_pnl = (entry_px - d["price"]) / entry_px
+                                tracker_pnl = (entry_px - tracker_px) / entry_px
+                            else:
+                                snapshot_pnl = (d["price"] - entry_px) / entry_px
+                                tracker_pnl = (tracker_px - entry_px) / entry_px
+                            pnl_gap = abs(snapshot_pnl - tracker_pnl)
+                            if pnl_gap > 0.05:  # >5% PnL discrepancy
+                                logger.error(
+                                    "[decide] PRICE SANITY REJECT %s: snapshot_px=%.2f (pnl=%.2f%%) vs "
+                                    "tracker_px=%.2f (pnl=%.2f%%) — gap=%.2f%%, using tracker price",
+                                    ticker, d["price"], snapshot_pnl * 100,
+                                    tracker_px, tracker_pnl * 100, pnl_gap * 100,
+                                )
+                                d["price"] = tracker_px  # override with trusted tracker price
+
+                        # PnL: side-aware (short positions exit via COVER, not SELL, but guard anyway)
+                        if tracked and tracked.side == "short":
+                            gross_pnl = (entry_px - d["price"]) / entry_px if entry_px > 0 else 0
+                        else:
+                            gross_pnl = (d["price"] - entry_px) / entry_px if entry_px > 0 else 0
                         pnl_pct = gross_pnl - ROUND_TRIP_FEE  # net after fees
                         held_hours = tracked.held_hours
                         sell_reason = d.get("reasons", ["claude_sell"])[0] if d.get("reasons") else "claude_sell"
@@ -1485,6 +2386,7 @@ class CryptoRunner:
                         self._exit_cooldowns[ticker] = time.time() + 30  # 30s cooldown — agent decides re-entry
 
                         decision_src = d.get("decision_source", "claude_agent")
+                        _sell_side = tracked.side if tracked else "long"
                         await self.event_bus.publish("position.exit", {
                             "ticker": ticker,
                             "source": decision_src,
@@ -1496,6 +2398,10 @@ class CryptoRunner:
                             "qty": sell_qty,
                             "broker": "binance",
                             "agent_signals": d.get("agent_signals", {}),
+                            "position_side": _sell_side,
+                            "mfe": tracked.mfe if tracked else 0,
+                            "mae": tracked.mae if tracked else 0,
+                            "capture_ratio": tracked.capture_ratio if tracked else 0,
                         })
                         # Untrack AFTER event publish so _on_exit can read position
                         self.position_tracker.untrack(ticker)
@@ -1510,6 +2416,123 @@ class CryptoRunner:
                             dry_run=dry_run,
                         )
                         self._write_alert("SELL", f"{ticker} @ ${d['price']:,.2f} PnL={pnl_pct:+.2%}")
+
+                    elif d["action"] == "SHORT" and d.get("price", 0) > 0:
+                        # SHORT confidence gate: require >= 0.75 confidence (31.9% WR at lower thresholds)
+                        short_conf = d.get("confidence", 0)
+                        if short_conf < 0.75:
+                            logger.info("[decide] SHORT %s blocked: confidence %.2f < 0.75 threshold", ticker, short_conf)
+                            continue
+                        if ticker not in executed_tickers:
+                            logger.warning("[decide] SHORT %s failed execution, skipping track", ticker)
+                            continue
+
+                        existing_pos = self.position_tracker.get_position(ticker)
+                        if existing_pos is not None:
+                            logger.info("[decide] SHORT %s skipped: already holding position", ticker)
+                            continue
+                        # Anti-churn: block re-entry within cooldown
+                        cooldown_until = self._exit_cooldowns.get(ticker, 0)
+                        if time.time() < cooldown_until:
+                            remaining = int(cooldown_until - time.time())
+                            logger.info("[decide] SHORT %s blocked: anti-churn cooldown (%ds left)", ticker, remaining)
+                            continue
+                        self._entry_prices[ticker] = d["price"]
+                        pv_at_entry = snapshot.portfolio_value if snapshot.portfolio_value > 0 else 1
+                        self._entry_meta[ticker] = {
+                            "position_pct": d.get("position_size_usd", 0) / pv_at_entry,
+                            "confidence": d.get("confidence", 0),
+                            "ta_snapshot": self._extract_ta_signals(ticker, snapshot),
+                        }
+                        qty = d.get("position_size_usd", 0) / d["price"] if d["price"] > 0 else 0
+                        if qty > 0:
+                            self.position_tracker.track(
+                                ticker=ticker,
+                                broker="binance",
+                                entry_price=d["price"],
+                                qty=qty,
+                                market_type="crypto",
+                                regime=snapshot.combined_regime,
+                                side="short",
+                            )
+                        await self.event_bus.publish("decision.signal", {
+                            "ticker": ticker,
+                            "signals": d.get("agent_signals", {}),
+                        })
+                        decision_src = d.get("decision_source", "claude_agent")
+                        self._log_trade(
+                            "SHORT", ticker, d["price"], qty, d.get("position_size_usd", 0),
+                            reason=d.get("reasons", [""])[0] if d.get("reasons") else "",
+                            regime=snapshot.combined_regime, confidence=d.get("confidence", 0),
+                            source=decision_src,
+                            dry_run=dry_run,
+                        )
+                        self._write_alert("SHORT", f"{ticker} @ ${d['price']:,.2f} ({d.get('confidence',0):.0%})")
+
+                    elif d["action"] == "COVER" and d.get("price", 0) > 0:
+                        if ticker not in executed_tickers:
+                            # Check if position still exists on exchange
+                            try:
+                                fresh_qty = self.broker._get_position_qty(
+                                    self.broker._normalize_symbol(ticker))
+                                if fresh_qty <= 0:
+                                    logger.warning("[decide] COVER %s failed — no position on exchange, cleaning up tracker", ticker)
+                                    self.position_tracker.untrack(ticker)
+                                    self._entry_prices.pop(ticker, None)
+                                    self._save_state()
+                                else:
+                                    logger.warning("[decide] COVER %s failed execution (exchange has %.8f), skipping", ticker, fresh_qty)
+                            except Exception:
+                                logger.warning("[decide] COVER %s failed execution, skipping", ticker)
+                            continue
+                        tracked = self.position_tracker.get_position(ticker)
+                        if tracked is None:
+                            logger.info("[decide] %s already exited by safety layer, skipping COVER", ticker)
+                            self._entry_prices.pop(ticker, None)
+                            continue
+
+                        entry_px = self._entry_prices.get(ticker, d["price"])
+                        # SHORT PnL: (entry - exit) / entry
+                        if tracked.side == "short":
+                            gross_pnl = (entry_px - d["price"]) / entry_px if entry_px > 0 else 0
+                        else:
+                            gross_pnl = (d["price"] - entry_px) / entry_px if entry_px > 0 else 0
+                        pnl_pct = gross_pnl - ROUND_TRIP_FEE
+                        held_hours = tracked.held_hours
+                        cover_reason = d.get("reasons", ["claude_cover"])[0] if d.get("reasons") else "claude_cover"
+
+                        cover_qty = tracked.qty if tracked else 0
+                        self._exit_cooldowns[ticker] = time.time() + 30
+
+                        decision_src = d.get("decision_source", "claude_agent")
+                        _cover_side = tracked.side if tracked else "short"
+                        await self.event_bus.publish("position.exit", {
+                            "ticker": ticker,
+                            "source": decision_src,
+                            "reason": cover_reason,
+                            "entry_price": entry_px,
+                            "exit_price": d["price"],
+                            "pnl_pct": pnl_pct,
+                            "held_hours": held_hours,
+                            "qty": cover_qty,
+                            "broker": "binance",
+                            "agent_signals": d.get("agent_signals", {}),
+                            "position_side": _cover_side,
+                            "mfe": tracked.mfe if tracked else 0,
+                            "mae": tracked.mae if tracked else 0,
+                            "capture_ratio": tracked.capture_ratio if tracked else 0,
+                        })
+                        self.position_tracker.untrack(ticker)
+                        self._entry_prices.pop(ticker, None)
+                        cover_value = d["price"] * cover_qty
+                        self._log_trade(
+                            "COVER", ticker, d["price"], cover_qty, cover_value,
+                            pnl_pct=pnl_pct, held_hours=held_hours,
+                            reason=cover_reason, regime=snapshot.combined_regime,
+                            source=decision_src, confidence=d.get("confidence", 0),
+                            dry_run=dry_run,
+                        )
+                        self._write_alert("COVER", f"{ticker} @ ${d['price']:,.2f} PnL={pnl_pct:+.2%}")
 
                 # Persist state after any trade
                 if executed_tickers:
@@ -1543,7 +2566,19 @@ class CryptoRunner:
                     continue
                 action = "BUY"  # broker executes as a BUY order
                 is_add = True
-            if ticker not in snapshot.candidates and action == "BUY":
+            if action == "SELL":
+                # SELL: close existing LONG position
+                tracked = self.position_tracker.get_position(ticker)
+                if tracked is None or tracked.side != "long":
+                    logger.info("[decide] SELL %s skipped: no long position", ticker)
+                    continue
+            if action == "COVER":
+                # COVER: close existing SHORT position
+                tracked = self.position_tracker.get_position(ticker)
+                if tracked is None or tracked.side != "short":
+                    logger.info("[decide] COVER %s skipped: no short position", ticker)
+                    continue
+            if ticker not in snapshot.candidates and action in ("BUY", "SHORT"):
                 continue
 
             price = snapshot.ticker_prices.get(ticker, 0)
@@ -1560,7 +2595,7 @@ class CryptoRunner:
                 position_pct = 0.10
 
             # Enforce max portfolio exposure (CRYPTO_RISK_CONFIG["max_exposure_pct"])
-            if action == "BUY":
+            if action in ("BUY", "SHORT"):
                 max_exposure = CRYPTO_RISK_CONFIG.get("max_exposure_pct", 0.60)
                 current_exposure = 0.0
                 if snapshot.portfolio_value > 0:
@@ -1578,6 +2613,10 @@ class CryptoRunner:
                         continue  # skip: would exceed exposure limit
 
             position_size_usd = snapshot.portfolio_value * position_pct
+            # Binance Futures minimum notional = $100
+            if action in ("BUY", "SHORT") and position_size_usd < 100.0 and snapshot.portfolio_value >= 100.0:
+                logger.info("[decide] position_size_usd=$%.2f < $100 minimum, bumping to $100", position_size_usd)
+                position_size_usd = 100.0
 
             # Agent decides confidence — no hardcoded filter.
             # Claude's confidence is logged for H-TS learning, not gatekept.
@@ -1612,8 +2651,8 @@ class CryptoRunner:
                 "reasons": [reasoning],
                 "agent_signals": agent_signals,
             }
-            # For SELL: include qty from tracker so dry_run doesn't need REST
-            if action == "SELL":
+            # For SELL/COVER: include qty from tracker so dry_run doesn't need REST
+            if action in ("SELL", "COVER"):
                 tracked = self.position_tracker.get_position(ticker)
                 if tracked and tracked.qty > 0:
                     dec["qty"] = tracked.qty
@@ -1855,6 +2894,24 @@ class CryptoRunner:
             logger.warning("[runner] Agent tools injection failed: %s", exc)
 
         logger.info("[runner] Initial balance: $%.2f", self._initial_balance)
+
+        # Sync actual broker balance on startup
+        try:
+            bal = self.broker._exchange.fetch_balance()
+            total = bal.get("total", {})
+            usdt = float(total.get("USDT", 0))
+            usdc = float(total.get("USDC", 0))
+            broker_bal = usdt + usdc
+            if broker_bal > 0:
+                self._broker_balance = broker_bal
+                self._broker_balance_time = time.time()
+                logger.info("[runner] Broker balance synced: $%.2f (USDT=%.2f, USDC=%.2f)", broker_bal, usdt, usdc)
+                # Update initial_balance if broker has significantly more
+                if broker_bal > self._initial_balance * 2:
+                    logger.info("[runner] Updating initial_balance: $%.2f → $%.2f (broker has more)", self._initial_balance, broker_bal)
+                    self._initial_balance = broker_bal
+        except Exception as exc:
+            logger.warning("[runner] Broker balance sync failed: %s", exc)
 
         # Bootstrap OHLCV store from REST (one-time, then WS takes over)
         await self._bootstrap_ohlcv()

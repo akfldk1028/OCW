@@ -159,3 +159,10 @@ mcp.mount()  # 모든 FastAPI 엔드포인트를 MCP 도구로 노출
 | 4 | Liquidation + Basis | derivatives_monitor.py, ws_stream.py | 낮음 |
 | 5 | Fear & Greed 필터 | pipeline.py | 낮음 |
 | 6 | OpenClaw MCP | server.py | 낮음 |
+
+
+하는도중에 그것도봐 지금 전반적인 코드가 제대로 진짜 짜임새잇게되잇는지 타당한지     
+    에이전트거래에                                                                       
+  ❯ 인터넷도 보고스캘핑에서 돈을벌수잇어 근데 내가 못할뿐이지 사람들 잘하는사람 그거       
+    된다고 너는 할수잇으니까 잘하는사람 비법도 좀보고                                    
+  ❯ 그걸 강화 학습해야한다고       

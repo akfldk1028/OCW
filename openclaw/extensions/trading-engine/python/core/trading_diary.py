@@ -109,6 +109,10 @@ class TradingDiary:
         exit_source: str,
         agent_signals: Dict[str, float],
         entry_context: Optional[Dict[str, Any]] = None,
+        position_side: str = "long",
+        mfe: float = 0.0,
+        mae: float = 0.0,
+        capture_ratio: float = 0.0,
     ) -> None:
         """Layer 1: Record structured reflection for a single trade.
 
@@ -118,36 +122,44 @@ class TradingDiary:
         now = datetime.now(timezone.utc)
         trade_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{ticker.split('/')[0]}"
 
-        # Chain of Hindsight: classify signals as worked/failed (long-only system)
+        is_short = position_side == "short"
+        side_label = "SHORT" if is_short else "LONG"
+
+        # Chain of Hindsight: classify signals as worked/failed (side-aware)
+        # Signal weight > 0 = "supported my decision", < 0 = "contradicted my decision"
         what_worked = []
         what_failed = []
         for sig, weight in (agent_signals or {}).items():
             if weight > 0 and pnl_pct > 0:
-                what_worked.append(f"{sig} correctly bullish (aligned with winning long)")
+                what_worked.append(f"{sig} correctly supported winning {side_label}")
             elif weight > 0 and pnl_pct < -0.001:
-                what_failed.append(f"{sig} was bullish but price fell (long lost)")
+                what_failed.append(f"{sig} supported {side_label} but trade lost")
             elif weight < 0 and pnl_pct > 0:
-                what_failed.append(f"{sig} was bearish but long still profited (signal wrong)")
+                what_failed.append(f"{sig} contradicted {side_label} but trade still profited (signal wrong)")
             elif weight < 0 and pnl_pct < -0.001:
-                what_worked.append(f"{sig} correctly warned bearish (long lost as predicted)")
+                what_worked.append(f"{sig} correctly warned against {side_label} ({side_label} lost as predicted)")
 
         # Determine outcome
         outcome = "win" if pnl_pct > 0 else ("loss" if pnl_pct < -0.001 else "breakeven")
 
-        # ECHO: hindsight rewriting for losses (long-only system)
+        # ECHO: hindsight rewriting for losses
         hindsight = ""
         if outcome == "loss" and entry_price > 0 and exit_price > 0:
             reverse_pnl = -pnl_pct
-            hindsight = f"If shorted instead, PnL would be ~{reverse_pnl:+.2%}"
+            opposite = "bought" if is_short else "shorted"
+            hindsight = f"If {opposite} instead, PnL would be ~{reverse_pnl:+.2%}"
         elif outcome == "win" and entry_price > 0:
-            hindsight = f"Entry at ${entry_price:,.2f}, held {held_hours:.1f}h"
+            hindsight = f"{side_label} entry at ${entry_price:,.2f}, held {held_hours:.1f}h"
 
-        # Build lesson string
+        # Build lesson string (include MFE/MAE for exit quality feedback)
         top_signals = sorted(agent_signals.items(), key=lambda x: abs(x[1]), reverse=True)[:3]
         sig_names = " + ".join(s[0] for s in top_signals) if top_signals else "unknown"
+        mfe_str = f", MFE={mfe:+.2%}" if mfe else ""
+        mae_str = f", MAE={mae:+.2%}" if mae else ""
+        cap_str = f", capture={capture_ratio*100:.0f}%" if mfe > 0 else ""
         lesson = (
             f"In {regime.split('_')[0] if '_' in regime else regime}, "
-            f"{sig_names} → {outcome} (PnL {pnl_pct:+.2%})"
+            f"{sig_names} → {side_label} {outcome} (PnL {pnl_pct:+.2%}{mfe_str}{mae_str}{cap_str})"
         )
 
         # LLM Regret (Park 2024): regret score for losses
@@ -156,9 +168,7 @@ class TradingDiary:
             papers_applied.append("ECHO (Hu 2025)")
             papers_applied.append("LLM Regret (Park 2024)")
 
-        # Determine side from signals
-        net_signal = sum(agent_signals.values()) if agent_signals else 0
-        side = "LONG" if net_signal >= 0 else "SHORT"
+        side = side_label
 
         entry_ctx = entry_context or {}
 
@@ -171,6 +181,9 @@ class TradingDiary:
             "exit_price": exit_price,
             "pnl_pct": round(pnl_pct, 6),
             "held_hours": round(held_hours, 4),
+            "mfe": round(mfe, 6),
+            "mae": round(mae, 6),
+            "capture_ratio": round(capture_ratio, 4),
             "regime": regime,
             "exit_reason": exit_reason,
             "exit_source": exit_source,
@@ -194,6 +207,185 @@ class TradingDiary:
         self._append_jsonl(self._reflections_path, record)
         logger.info("[diary] L1 reflection: %s %s %s PnL=%+.2f%%",
                     ticker, outcome, exit_reason, pnl_pct * 100)
+
+    def record_missed_opportunity(
+        self,
+        ticker: str,
+        hold_price: float,
+        current_price: float,
+        raw_pnl_pct: float,
+        horizon: str,
+        regime: str,
+        ta_signals: Dict[str, float],
+        direction: Optional[str] = None,
+    ) -> None:
+        """Record a missed opportunity (counterfactual) in diary.
+
+        Only records significant misses (> 0.5%) so the diary doesn't flood
+        with noise. Claude sees these in prompt context as lessons.
+        """
+        if abs(raw_pnl_pct) < 0.005:  # < 0.5% = not worth noting
+            return
+
+        now = datetime.now(timezone.utc)
+        if direction is None:
+            direction = "BUY" if raw_pnl_pct > 0 else "SHORT"
+        top_signals = sorted(ta_signals.items(), key=lambda x: abs(x[1]), reverse=True)[:3]
+        sig_names = " + ".join(s[0] for s in top_signals) if top_signals else "unknown"
+
+        record = {
+            "trade_id": f"{now.strftime('%Y%m%d_%H%M%S')}_{ticker.split('/')[0]}_missed",
+            "timestamp": now.isoformat(),
+            "ticker": ticker,
+            "side": direction,
+            "entry_price": hold_price,
+            "exit_price": current_price,
+            "pnl_pct": round(raw_pnl_pct, 6),
+            "held_hours": 0,
+            "regime": regime,
+            "exit_reason": "counterfactual",
+            "exit_source": f"missed_{horizon}",
+            "entry_context": {
+                "reasoning": f"HOLD decision — price moved {raw_pnl_pct:+.2%} over {horizon} window",
+                "confidence": 0,
+                "signal_weights": ta_signals,
+                "learning_note": "",
+            },
+            "reflection": {
+                "outcome": "missed",
+                "what_worked": [],
+                "what_failed": [f"Missed {direction} opportunity: {sig_names} signaled but SIT OUT overrode"],
+                "hindsight": f"If {direction.lower()} at ${hold_price:,.2f}, would be {raw_pnl_pct:+.2%} after {horizon}",
+                "lesson": f"In {regime.split('_')[0] if '_' in regime else regime}, {sig_names} → missed {raw_pnl_pct:+.2%} ({horizon})",
+                "paper_applied": "LLM Regret (Park 2024) + Chain of Hindsight (Liu 2023)",
+            },
+        }
+
+        self._append_jsonl(self._reflections_path, record)
+        logger.info("[diary] L1 missed: %s %s %+.2f%% (%s)",
+                    ticker, direction, raw_pnl_pct * 100, horizon)
+
+    def record_correct_hold(
+        self,
+        ticker: str,
+        hold_price: float,
+        current_price: float,
+        avoided_pct: float,
+        horizon: str,
+        regime: str,
+        ta_signals: Dict[str, float],
+    ) -> None:
+        """Record a validated correct HOLD — price dropped, we were right not to buy."""
+        if abs(avoided_pct) < 0.005:
+            return
+
+        now = datetime.now(timezone.utc)
+        top_signals = sorted(ta_signals.items(), key=lambda x: abs(x[1]), reverse=True)[:3]
+        bearish_sigs = [s for s, v in top_signals if v < 0]
+        sig_names = " + ".join(bearish_sigs) if bearish_sigs else " + ".join(s for s, _ in top_signals)
+
+        record = {
+            "trade_id": f"{now.strftime('%Y%m%d_%H%M%S')}_{ticker.split('/')[0]}_hold_ok",
+            "timestamp": now.isoformat(),
+            "ticker": ticker,
+            "side": "HOLD",
+            "entry_price": hold_price,
+            "exit_price": current_price,
+            "pnl_pct": round(avoided_pct, 6),
+            "held_hours": 0,
+            "regime": regime,
+            "exit_reason": "correct_hold",
+            "exit_source": f"validated_{horizon}",
+            "entry_context": {
+                "reasoning": f"Correct HOLD — avoided {avoided_pct:+.2%} loss over {horizon}",
+                "confidence": 0,
+                "signal_weights": ta_signals,
+                "learning_note": "",
+            },
+            "reflection": {
+                "outcome": "correct_hold",
+                "what_worked": [f"HOLD decision validated: {sig_names} correctly warned bearish"],
+                "what_failed": [],
+                "hindsight": f"Avoided buying at ${hold_price:,.2f}, now ${current_price:,.2f} ({avoided_pct:+.2%})",
+                "lesson": f"In {regime.split('_')[0] if '_' in regime else regime}, {sig_names} → correct HOLD, avoided {avoided_pct:+.2%} ({horizon})",
+                "paper_applied": "Reflexion (Shinn 2023)",
+            },
+        }
+
+        self._append_jsonl(self._reflections_path, record)
+        logger.info("[diary] L1 correct_hold: %s avoided %+.2f%% (%s)",
+                    ticker, avoided_pct * 100, horizon)
+
+    def record_exit_regret(
+        self,
+        ticker: str,
+        exit_price: float,
+        current_price: float,
+        pnl_at_exit: float,
+        additional_pnl: float,
+        horizon: str,
+        regime: str,
+        agent_signals: Dict[str, float],
+        held_hours: float,
+        position_side: str = "long",
+        was_premature: bool = True,
+    ) -> None:
+        """Record post-exit counterfactual — premature exit or good exit."""
+        if abs(additional_pnl) < 0.005:  # < 0.5% = not worth noting
+            return
+
+        now = datetime.now(timezone.utc)
+        top_signals = sorted(agent_signals.items(), key=lambda x: abs(x[1]), reverse=True)[:3]
+        sig_names = " + ".join(s[0] for s in top_signals) if top_signals else "unknown"
+
+        if was_premature:
+            outcome = "premature_exit"
+            suffix = "early"
+            what_failed = [f"Exited too early: held {held_hours:.1f}h, missed {additional_pnl:+.2%} more"]
+            what_worked = []
+            hindsight = (f"Sold {position_side.upper()} at ${exit_price:,.2f} ({pnl_at_exit:+.2%}), "
+                         f"now ${current_price:,.2f} ({additional_pnl:+.2%} additional)")
+            lesson = f"In {regime.split('_')[0] if '_' in regime else regime}, {sig_names} → premature {position_side} exit, missed {additional_pnl:+.2%} ({horizon})"
+        else:
+            outcome = "good_exit"
+            suffix = "good"
+            what_worked = [f"Good exit timing: {sig_names} correctly signaled reversal"]
+            what_failed = []
+            hindsight = (f"Sold {position_side.upper()} at ${exit_price:,.2f} ({pnl_at_exit:+.2%}), "
+                         f"now ${current_price:,.2f} (avoided {abs(additional_pnl):+.2%} loss)")
+            lesson = f"In {regime.split('_')[0] if '_' in regime else regime}, {sig_names} → correct {position_side} exit, avoided {abs(additional_pnl):+.2%} ({horizon})"
+
+        record = {
+            "trade_id": f"{now.strftime('%Y%m%d_%H%M%S')}_{ticker.split('/')[0]}_exit_{suffix}",
+            "timestamp": now.isoformat(),
+            "ticker": ticker,
+            "side": position_side.upper(),
+            "entry_price": exit_price,  # "entry" for this CF = the exit price
+            "exit_price": current_price,
+            "pnl_pct": round(additional_pnl, 6),
+            "held_hours": round(held_hours, 4),
+            "regime": regime,
+            "exit_reason": "exit_regret",
+            "exit_source": f"{outcome}_{horizon}",
+            "entry_context": {
+                "reasoning": f"Post-exit tracking: price moved {additional_pnl:+.2%} after {horizon}",
+                "confidence": 0,
+                "signal_weights": agent_signals,
+                "learning_note": "",
+            },
+            "reflection": {
+                "outcome": outcome,
+                "what_worked": what_worked,
+                "what_failed": what_failed,
+                "hindsight": hindsight,
+                "lesson": lesson,
+                "paper_applied": "LLM Regret (Park 2024) + Exit Regret Learning",
+            },
+        }
+
+        self._append_jsonl(self._reflections_path, record)
+        logger.info("[diary] L1 %s: %s %+.2f%% (%s)",
+                    outcome, ticker, additional_pnl * 100, horizon)
 
     # ------------------------------------------------------------------
     # Layer 2: Daily Digest (Claude 1x/day)
@@ -407,7 +599,7 @@ class TradingDiary:
             + "\n\nOutput JSON: {\"narrative\": \"...\", \"patterns\": [...], \"lessons\": [...]}"
         )
 
-        response = await self._claude_agent._call_sdk(DIGEST_SYSTEM, prompt, use_tools=False)
+        response = await self._claude_agent._call_cli(DIGEST_SYSTEM, prompt)
         if not response:
             return ("", [], [])
 
@@ -553,6 +745,7 @@ class TradingDiary:
                     "text": nl["text"],
                     "regime_scope": nl.get("regime_scope", "*"),
                     "signals": nl.get("signals", []),
+                    "outcome": nl.get("outcome", ""),
                     "occurrences": 1,
                     "strength": nl.get("strength", 0.5),
                     "decay_factor": 1.0,
@@ -643,7 +836,13 @@ class TradingDiary:
         return lessons
 
     def _lessons_similar(self, existing: Dict, new: Dict) -> bool:
-        """TradingGroup heuristic: same regime + 2+ shared signals → merge."""
+        """TradingGroup heuristic: same regime + outcome + high signal overlap → merge."""
+        # Outcome must match (win↔win, loss↔loss)
+        e_outcome = existing.get("outcome", "")
+        n_outcome = new.get("outcome", "")
+        if e_outcome and n_outcome and e_outcome != n_outcome:
+            return False
+
         # Regime match (wildcard)
         e_scope = existing.get("regime_scope", "*")
         n_scope = new.get("regime_scope", "*")
@@ -653,11 +852,15 @@ class TradingDiary:
             if e_base != n_base:
                 return False
 
-        # Signal overlap
+        # Signal overlap: Jaccard >= 0.5 AND min 3 shared
         e_sigs = set(existing.get("signals", []))
         n_sigs = set(new.get("signals", []))
+        if not e_sigs or not n_sigs:
+            return False
         shared = e_sigs & n_sigs
-        return len(shared) >= 2
+        union = e_sigs | n_sigs
+        jaccard = len(shared) / len(union) if union else 0
+        return len(shared) >= 3 and jaccard >= 0.5
 
     # ------------------------------------------------------------------
     # Prompt injection: get_prompt_context
@@ -681,7 +884,8 @@ class TradingDiary:
             lines = ["### Recent Trades (last {})".format(len(recent))]
             for i, r in enumerate(recent, 1):
                 refl = r.get("reflection", {})
-                outcome_sym = "+" if refl.get("outcome") == "win" else "-"
+                outcome = refl.get("outcome", "")
+                outcome_sym = "+" if outcome == "win" else ("~" if outcome == "missed" else ("v" if outcome == "correct_hold" else "-"))
                 short_lesson = refl.get("lesson", "")[:80]
                 lines.append(
                     f"{i}. {r['ticker']} {r['side']} {outcome_sym}{abs(r['pnl_pct'])*100:.2f}%: {short_lesson}"

@@ -15,6 +15,7 @@ export interface Position {
   pnl_pct: number;
   held_hours: number;
   trailing_high: number;
+  side?: string;
 }
 
 export interface GateInfo {
@@ -38,6 +39,9 @@ export interface StatusData {
   uptime_seconds: number;
   tick_prices: Record<string, number>;
   timestamp: number;
+  realized_pnl_usd?: number;
+  today_pnl_pct?: number;
+  today_trades?: number;
 }
 
 export interface WakeCondition {
@@ -93,9 +97,44 @@ export interface TradeSummary {
   cumulative_pnl_pct: number;
 }
 
+export interface BetaInfo {
+  name: string;
+  alpha: number;
+  beta: number;
+  mean: number;
+  std: number;
+  total_trades: number;
+}
+
+export interface GroupSummary {
+  group_beta: BetaInfo;
+  signals: Record<string, BetaInfo>;
+}
+
+export interface RegimeSignalInfo {
+  mean: number;
+  total_trades: number;
+}
+
+export interface RegimeInfo {
+  trade_count: number;
+  using_own_weights: boolean;
+  group_means: Record<string, number>;
+  meta_param_means: Record<string, number>;
+  signal_reliability: Record<string, RegimeSignalInfo>;
+}
+
 export interface TSWeights {
   current_regime: string;
   mean_weights: Record<string, number>;
+  signal_reliability: Record<string, number>;
+  group_weights: Record<string, number>;
+  meta_params: Record<string, number>;
+  meta_params_global: Record<string, number>;
+  meta_param_betas: Record<string, BetaInfo>;
+  meta_param_betas_global: Record<string, BetaInfo>;
+  group_summary: Record<string, GroupSummary>;
+  regime_info: Record<string, RegimeInfo>;
   total_trades: number;
   has_enough_data: boolean;
   cumulative_pnl_pct: number;
@@ -125,4 +164,29 @@ export interface EquityPoint {
 
 export interface EquityCurve {
   points: EquityPoint[];
+}
+
+export interface DayPerf {
+  date: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  pnl_pct: number;
+  pnl_usd: number;
+  best_trade_pct: number;
+  worst_trade_pct: number;
+  cumulative_pnl_pct: number;
+}
+
+export interface DailyPnlData {
+  days: DayPerf[];
+  summary: {
+    total_days: number;
+    total_trades: number;
+    total_pnl_pct: number;
+    total_pnl_usd: number;
+    current_portfolio_value: number;
+    initial_balance: number;
+  };
 }

@@ -3,7 +3,7 @@
 Usage:
     python main.py                          # testnet spot, 4h swing (default)
     python main.py --daily                  # testnet spot, daily bars
-    python main.py --futures --leverage 3   # testnet futures 3x
+    python main.py --futures --leverage 3   # demo futures 3x (auto-enables demo mode)
     python main.py --live                   # real trading (CAUTION)
     python main.py --live --futures --leverage 2  # real futures 2x
 
@@ -12,7 +12,9 @@ Requires Binance API keys in binance/.env:
     BINANCE_SECRET_KEY=...
     BINANCE_PAPER=true
 
-For Futures testnet, get keys from: https://testnet.binancefuture.com/
+For Spot testnet: keys from https://testnet.binance.vision/
+For Futures (demo): keys from https://www.binance.com/en/demo-trading
+  (Binance deprecated futures testnet/sandbox — demo trading replaces it)
 """
 import argparse
 import asyncio
@@ -57,6 +59,7 @@ def main() -> None:
     group.add_argument("--testnet", action="store_true", help="Use Binance testnet (default)")
     parser.add_argument("--futures", action="store_true", help="Use Futures market (default: Spot)")
     parser.add_argument("--leverage", type=int, default=1, help="Futures leverage (default: 1x)")
+    parser.add_argument("--demo", action="store_true", help="Use Binance demo trading (required for futures testnet)")
     parser.add_argument("--daily", action="store_true", help="Use daily bars instead of 4h swing")
     args = parser.parse_args()
 
@@ -70,6 +73,15 @@ def main() -> None:
         env_path = env_dir / ".env"
     load_dotenv(env_path)
 
+    # === API KEY GUARD ===
+    # Max 구독 CLI 사용 — API key가 환경에 있으면 제거 (과금 방지)
+    for _key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        if _key in os.environ:
+            del os.environ[_key]
+            logging.getLogger("main").warning(
+                "BLOCKED: %s removed from environment — using Max subscription CLI (no billing)", _key
+            )
+
     # Override env based on args
     if args.live:
         os.environ["LIVE_TRADING"] = "true"
@@ -81,15 +93,22 @@ def main() -> None:
     if args.daily:
         os.environ["BLEND_MODE"] = "daily"
 
+    # Demo trading: required for futures testnet (sandbox deprecated)
+    if args.demo or (args.futures and not args.live):
+        os.environ["BINANCE_USE_DEMO"] = "true"
+
     _setup_logging(LOG_LEVEL)
     logger = logging.getLogger("main")
 
     market = "future" if args.futures else "spot"
-    mode = "LIVE" if args.live else "TESTNET"
+    is_demo = os.environ.get("BINANCE_USE_DEMO", "").lower() in ("1", "true")
+    mode = "LIVE" if args.live else ("DEMO" if is_demo else "TESTNET")
     blend = "daily" if args.daily else "swing (4h)"
     logger.info("=" * 60)
     logger.info("Binance Crypto Trader - %s %s mode", mode, market.upper())
     logger.info("Config: %s, Leverage: %dx", blend, args.leverage)
+    if is_demo and not args.live:
+        logger.info("Demo trading: API keys from https://www.binance.com/en/demo-trading")
     logger.info("=" * 60)
 
     if args.live:

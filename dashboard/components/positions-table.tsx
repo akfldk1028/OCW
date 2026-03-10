@@ -24,6 +24,7 @@ export default function PositionsTable() {
             <thead>
               <tr className="text-[var(--muted)] text-xs border-b border-[var(--border)]">
                 <th className="text-left pb-2">Ticker</th>
+                <th className="text-left pb-2">Side</th>
                 <th className="text-right pb-2">Entry</th>
                 <th className="text-right pb-2">Current</th>
                 <th className="text-right pb-2">PnL</th>
@@ -34,6 +35,12 @@ export default function PositionsTable() {
               {entries.map(([ticker, pos]) => (
                 <tr key={ticker} className="border-b border-[var(--border)] last:border-0">
                   <td className="py-2 font-mono font-medium">{ticker}</td>
+                  <td className={clsx(
+                    "py-2 text-xs font-mono font-bold",
+                    pos.side === "short" ? "text-[var(--red)]" : "text-[var(--green)]"
+                  )}>
+                    {pos.side === "short" ? "SHORT" : "LONG"}
+                  </td>
                   <td className="py-2 text-right font-mono">
                     ${pos.entry_price.toLocaleString()}
                   </td>

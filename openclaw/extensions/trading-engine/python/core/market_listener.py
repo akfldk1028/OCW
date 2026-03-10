@@ -41,7 +41,7 @@ class MarketListener:
         "spot_live": "wss://stream.binance.com:9443/stream",
         "spot_testnet": "wss://stream.testnet.binance.vision/stream",
         "future_live": "wss://fstream.binance.com/stream",
-        "future_testnet": "wss://fstream.binancefuture.com/stream",
+        "future_testnet": "wss://fstream.binance.com/stream",  # demo uses live market data
     }
 
     def __init__(
@@ -75,6 +75,7 @@ class MarketListener:
         # Select correct WS URL
         env = "testnet" if testnet else "live"
         self._ws_base = self.WS_URLS[f"{market}_{env}"]
+        self._is_futures = market == "future"
 
         # OHLCV store — WS candle closes feed into this (replaces REST polling)
         self._ohlcv_store = ohlcv_store
@@ -88,12 +89,15 @@ class MarketListener:
         self._last_message_time: float = 0.0  # for watchdog
 
     def _build_stream_url(self) -> str:
-        """Build combined stream URL for all tickers x all intervals."""
+        """Build combined stream URL for all tickers x all intervals + forceOrder."""
         streams = []
         for tic in self._tickers:
             symbol = tic.replace("/", "").lower()
             for interval in self._kline_intervals:
                 streams.append(f"{symbol}@kline_{interval}")
+            # Real-time forced liquidation events (futures only — spot doesn't support)
+            if self._is_futures:
+                streams.append(f"{symbol}@forceOrder")
         return f"{self._ws_base}?streams={'/'.join(streams)}"
 
     async def run(self) -> None:
@@ -131,8 +135,11 @@ class MarketListener:
                 msg = json.loads(raw)
                 self._last_message_time = time.time()
                 data = msg.get("data", {})
-                if data.get("e") == "kline":
+                event_type = data.get("e")
+                if event_type == "kline":
                     await self._handle_kline(data)
+                elif event_type == "forceOrder":
+                    await self._handle_force_order(data)
             except Exception as exc:
                 logger.warning("[ws] Failed to process message: %s", exc)
 
@@ -235,6 +242,26 @@ class MarketListener:
                 "direction": direction,
                 "timestamp": time.time(),
             })
+
+    async def _handle_force_order(self, data: dict) -> None:
+        """Process a forceOrder event (real-time liquidation)."""
+        order = data.get("o", {})
+        symbol = order.get("s", "")
+        ticker = self._symbol_to_ticker(symbol)
+        side = order.get("S", "")  # BUY = short liquidated, SELL = long liquidated
+        price = float(order.get("p", 0))
+        qty = float(order.get("q", 0))
+        usd = price * qty
+        if usd <= 0:
+            return
+        await self._event_bus.publish("market.force_order", {
+            "ticker": ticker,
+            "side": side,
+            "price": price,
+            "qty": qty,
+            "usd_value": usd,
+            "timestamp": time.time(),
+        })
 
     def stop(self) -> None:
         """Signal the listener to stop."""

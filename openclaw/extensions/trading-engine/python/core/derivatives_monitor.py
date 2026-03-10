@@ -150,31 +150,38 @@ class DerivativesMonitor:
             logger.debug("[deriv] Funding fetch failed for %s: %s", ticker, exc)
 
     async def _check_oi(self, ticker: str) -> None:
-        """Check open interest for spikes."""
+        """Check open interest for spikes using Binance OI History API (4h change)."""
         try:
-            result = await asyncio.to_thread(self._broker.fetch_open_interest, ticker)
-            oi = result.get("openInterestAmount")
-            if oi is None:
-                return
-            oi = float(oi)
+            import requests as _req
+            symbol = ticker.replace("/", "").replace(":USDT", "")
 
-            prev_oi = self._last_oi.get(ticker)
-            prev_val = prev_oi if isinstance(prev_oi, (int, float)) else (
-                prev_oi.get("value", 0) if isinstance(prev_oi, dict) else 0)
-            oi_change = ((oi - prev_val) / prev_val) if prev_val > 0 else 0
+            resp = await asyncio.to_thread(
+                lambda: _req.get(
+                    "https://fapi.binance.com/futures/data/openInterestHist",
+                    params={"symbol": symbol, "period": "4h", "limit": 2},
+                    timeout=5,
+                )
+            )
+            result = resp.json() if resp.status_code == 200 else []
+            if not result or len(result) < 2:
+                return
+
+            oi_old = float(result[-2]["sumOpenInterestValue"])
+            oi_new = float(result[-1]["sumOpenInterestValue"])
+            oi_contracts = float(result[-1]["sumOpenInterest"])
+            oi_change = (oi_new - oi_old) / oi_old if oi_old > 0 else 0
+
             self._last_oi[ticker] = {
-                "value": oi,
+                "value": oi_contracts,
+                "oi_usd": oi_new,
                 "change_pct": round(oi_change, 4),
-                "direction": "increasing" if oi_change > 0.01 else (
-                    "decreasing" if oi_change < -0.01 else "stable"),
+                "direction": "increasing" if oi_change > 0.005 else (
+                    "decreasing" if oi_change < -0.005 else "stable"),
             }
-
-            if prev_val is None or prev_val <= 0:
-                return
 
             change_pct = abs(oi_change)
             if change_pct > self._oi_spike_threshold:
-                direction = "increasing" if oi > prev_val else "decreasing"
+                direction = "increasing" if oi_change > 0 else "decreasing"
                 logger.info(
                     "[deriv] OI spike: %s %.1f%% (%s)",
                     ticker, change_pct * 100, direction,
@@ -182,8 +189,8 @@ class DerivativesMonitor:
                 self._extreme_until = time.time() + self._poll_base
                 await self._event_bus.publish("market.oi_spike", {
                     "ticker": ticker,
-                    "open_interest": oi,
-                    "previous_oi": prev_val,
+                    "open_interest": oi_contracts,
+                    "previous_oi": oi_old,
                     "change_pct": change_pct,
                     "direction": direction,
                     "timestamp": time.time(),
@@ -194,16 +201,21 @@ class DerivativesMonitor:
     async def _check_taker_delta(self, ticker: str) -> None:
         """Check taker buy/sell volume delta (CVD approximation).
 
-        Uses Binance /futures/data/takerBuySellVol endpoint.
+        Uses Binance /futures/data/takerlongshortRatio endpoint (public, no auth).
         Buy/sell ratio < 0.85 = sell pressure, > 1.15 = buy pressure.
         CVD momentum (recent vs prior) detects divergences.
         """
         try:
+            import requests as _req
             symbol = ticker.replace("/", "").replace(":USDT", "")
-            result = await asyncio.to_thread(
-                self._broker.exchange.fapiPublicGetFuturesDataTakerBuySellVol,
-                {"symbol": symbol, "period": "4h", "limit": 6},
+            resp = await asyncio.to_thread(
+                lambda: _req.get(
+                    "https://fapi.binance.com/futures/data/takerlongshortRatio",
+                    params={"symbol": symbol, "period": "4h", "limit": 6},
+                    timeout=5,
+                )
             )
+            result = resp.json() if resp.status_code == 200 else []
             if not result or len(result) < 4:
                 return
 
@@ -244,11 +256,16 @@ class DerivativesMonitor:
         Z-score > 1.5 = too many longs (bearish), < -1.5 = too many shorts (bullish).
         """
         try:
+            import requests as _req
             symbol = ticker.replace("/", "").replace(":USDT", "")
-            result = await asyncio.to_thread(
-                self._broker.exchange.fapiPublicGetFuturesDataTopLongShortPositionRatio,
-                {"symbol": symbol, "period": "4h", "limit": 6},
+            resp = await asyncio.to_thread(
+                lambda: _req.get(
+                    "https://fapi.binance.com/futures/data/topLongShortPositionRatio",
+                    params={"symbol": symbol, "period": "4h", "limit": 6},
+                    timeout=5,
+                )
             )
+            result = resp.json() if resp.status_code == 200 else []
             if not result or len(result) < 4:
                 return
 
@@ -400,12 +417,18 @@ class DerivativesMonitor:
             logger.debug("[deriv] Basis spread fetch failed for %s: %s", ticker, exc)
 
     async def _check_stablecoin_supply(self) -> None:
-        """Fetch stablecoin supply from DeFiLlama. Cached for 4 hours."""
+        """Fetch stablecoin supply from DeFiLlama. Cached for 4 hours.
+
+        Uses chart API for USDT (id=1) to get daily change instead of
+        poll-to-poll comparison which is always 0% on first run.
+        """
         now = time.time()
         if now - self._stablecoin_last_fetch < 14400 and self._stablecoin_cache:
             return
         try:
             import requests
+
+            # Fetch current supply
             resp = await asyncio.to_thread(
                 requests.get,
                 "https://stablecoins.llama.fi/stablecoins?includePrices=true",
@@ -430,8 +453,23 @@ class DerivativesMonitor:
                 elif symbol == "USDC":
                     usdc_mcap = mcap
 
-            prev_total = self._stablecoin_cache.get("total_mcap", total_mcap)
-            change_pct = (total_mcap / prev_total - 1) if prev_total > 0 else 0
+            # Fetch USDT chart for daily change (id=1 = USDT)
+            change_pct = 0.0
+            try:
+                chart_resp = await asyncio.to_thread(
+                    lambda: requests.get(
+                        "https://stablecoins.llama.fi/stablecoincharts/all?stablecoin=1",
+                        timeout=10,
+                    )
+                )
+                chart_data = chart_resp.json() if chart_resp.status_code == 200 else []
+                if chart_data and len(chart_data) >= 2:
+                    latest = chart_data[-1].get("totalCirculating", {}).get("peggedUSD", 0)
+                    prev = chart_data[-2].get("totalCirculating", {}).get("peggedUSD", 0)
+                    if prev > 0:
+                        change_pct = (latest - prev) / prev  # daily change as fraction
+            except Exception:
+                pass
 
             self._stablecoin_cache = {
                 "total_mcap": total_mcap,

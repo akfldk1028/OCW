@@ -191,8 +191,8 @@ async function refreshSidebar() {
             for (const ev of events) {
                 const p = ev.payload || ev.data || {};
                 const action = p.action || '';
-                if (action !== 'BUY' && action !== 'SELL') continue;
-                const cls = action === 'BUY' ? 'buy' : 'sell';
+                if (!['BUY','SELL','SHORT','COVER'].includes(action)) continue;
+                const cls = (action === 'BUY' || action === 'COVER') ? 'buy' : 'sell';
                 const ts = ev.timestamp ? new Date(ev.timestamp * 1000).toLocaleTimeString() : '';
                 items.push(`<div class="signal-item ${cls}">
                     <strong>${action}</strong> ${p.ticker || ''}
@@ -217,8 +217,10 @@ async function refreshSidebar() {
                 for (const [tic, pos] of Object.entries(positions)) {
                     const pnl = pos.unrealized_pnl_pct || pos.pnl_pct || 0;
                     const pnlCls = pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+                    const side = pos.side || 'long';
+                    const sideBadge = side === 'short' ? '<span style="color:#ff9800;font-weight:bold">SHORT</span>' : '<span style="color:#2196F3">LONG</span>';
                     cards.push(`<div class="pos-card">
-                        <span class="ticker">${tic}</span>
+                        <span class="ticker">${tic}</span> ${sideBadge}
                         <span class="pnl ${pnlCls}">${(pnl*100).toFixed(1)}%</span>
                         <div class="detail">qty: ${pos.qty || 0} | ${name}</div>
                     </div>`);
@@ -254,13 +256,16 @@ function connectWS(symbol, interval) {
     ws.onerror = () => { statusEl.textContent = 'Error'; statusEl.className = 'status off'; };
 }
 
-// --- Apply BUY/SELL markers ---
+// --- Apply BUY/SELL/SHORT/COVER markers ---
 function applyMarkers(signals) {
+    const colorMap = { BUY: '#2196F3', SELL: '#e91e63', SHORT: '#ff9800', COVER: '#4caf50' };
+    const shapeMap = { BUY: 'arrowUp', SELL: 'arrowDown', SHORT: 'arrowDown', COVER: 'arrowUp' };
+    const posMap = { BUY: 'belowBar', SELL: 'aboveBar', SHORT: 'aboveBar', COVER: 'belowBar' };
     const markers = signals.map(s => ({
         time: s.time,
-        position: s.side === 'BUY' ? 'belowBar' : 'aboveBar',
-        color: s.side === 'BUY' ? '#2196F3' : '#e91e63',
-        shape: s.side === 'BUY' ? 'arrowUp' : 'arrowDown',
+        position: posMap[s.side] || 'aboveBar',
+        color: colorMap[s.side] || '#999',
+        shape: shapeMap[s.side] || 'circle',
         text: `${s.side}`,
     }));
     if (markers.length > 0) {

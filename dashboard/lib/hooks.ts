@@ -10,6 +10,7 @@ import {
   type TSWeights,
   type PriceHistory,
   type EquityCurve,
+  type DailyPnlData,
 } from "./api";
 
 const fetcher = <T,>(path: string) => fetchAPI<T>(path);
@@ -52,6 +53,12 @@ export function usePriceHistory(ticker = "BTC/USDT", limit = 200) {
 
 export function useEquityCurve() {
   return useSWR<EquityCurve>("/api/equity-curve", fetcher, {
+    refreshInterval: 60_000,
+  });
+}
+
+export function useDailyPnl() {
+  return useSWR<DailyPnlData>("/api/daily-pnl", fetcher, {
     refreshInterval: 60_000,
   });
 }

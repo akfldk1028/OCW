@@ -29,8 +29,7 @@ pnpm-lock.yaml
 
 # ── Secrets ──
 .env
-.env.local
-.env.production
+.env.*
 !.env.example
 *.key
 *.pem

@@ -75,7 +75,8 @@ export default function TradesTable() {
               {data.trades.map((t, i) => {
                 const pnl = Number(t.pnl_pct) * 100;
                 const isExpanded = expandedRow === i;
-                const isSell = t.action === "SELL";
+                const isExit = t.action === "SELL" || t.action === "COVER";
+                const isShort = t.action === "SHORT" || t.action === "COVER";
                 const entryPx = t.entry_price ? Number(t.entry_price) : null;
                 const exitPx = Number(t.price);
 
@@ -90,11 +91,15 @@ export default function TradesTable() {
                       {/* Action badge */}
                       <span
                         className={clsx(
-                          "text-[10px] font-mono font-bold px-1.5 py-0.5 rounded w-10 text-center shrink-0",
+                          "text-[10px] font-mono font-bold px-1.5 py-0.5 rounded w-14 text-center shrink-0",
                           t.action === "BUY" &&
                             "bg-green-900/30 text-[var(--green)]",
                           t.action === "SELL" &&
                             "bg-red-900/30 text-[var(--red)]",
+                          t.action === "SHORT" &&
+                            "bg-orange-900/30 text-orange-400",
+                          t.action === "COVER" &&
+                            "bg-purple-900/30 text-purple-400",
                           t.action === "ADD" &&
                             "bg-blue-900/30 text-[var(--blue)]"
                         )}
@@ -107,8 +112,8 @@ export default function TradesTable() {
                         {t.ticker?.replace("/USDT", "").replace(":USDT", "")}
                       </span>
 
-                      {/* Price — SELL shows entry→exit, BUY shows entry */}
-                      {isSell && entryPx ? (
+                      {/* Price — exit trades show entry→exit, entry trades show price */}
+                      {isExit && entryPx ? (
                         <span className="text-xs font-mono text-[var(--muted)] w-44 shrink-0 flex items-center gap-1">
                           <span className="text-[var(--green)]">{fmt$(entryPx)}</span>
                           <span className="text-[var(--muted)]">→</span>
@@ -124,12 +129,12 @@ export default function TradesTable() {
                       <span
                         className={clsx(
                           "text-xs font-mono font-bold w-16 shrink-0",
-                          isSell && pnl > 0 && "text-[var(--green)]",
-                          isSell && pnl < 0 && "text-[var(--red)]",
-                          !isSell && "text-[var(--muted)]"
+                          isExit && pnl > 0 && "text-[var(--green)]",
+                          isExit && pnl < 0 && "text-[var(--red)]",
+                          !isExit && "text-[var(--muted)]"
                         )}
                       >
-                        {isSell
+                        {isExit
                           ? `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}%`
                           : "—"}
                       </span>
@@ -153,9 +158,12 @@ export default function TradesTable() {
                     {/* Expanded details */}
                     {isExpanded && (
                       <div className="ml-12 mr-4 mb-2 px-3 py-2 rounded-lg bg-[var(--border)]/20 border border-[var(--border)]/50 text-xs space-y-2">
-                        {/* Price detail for SELL */}
-                        {isSell && entryPx && (
+                        {/* Price detail for exit trades (SELL/COVER) */}
+                        {isExit && entryPx && (
                           <div className="flex items-center gap-4 py-1 border-b border-[var(--border)]/30">
+                            {isShort && (
+                              <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-orange-900/30 text-orange-400">SHORT</span>
+                            )}
                             <div className="flex items-center gap-2">
                               <span className="text-[var(--muted)]">Entry:</span>
                               <span className="font-mono font-bold text-[var(--text)]">{fmt$(entryPx)}</span>
@@ -174,15 +182,21 @@ export default function TradesTable() {
                                 )}
                               >
                                 {pnl >= 0 ? "+" : ""}
-                                {pnl.toFixed(2)}% (${((exitPx - entryPx) * Number(t.qty)).toFixed(2)})
+                                {pnl.toFixed(2)}% (${(isShort
+                                  ? (entryPx - exitPx) * Number(t.qty)
+                                  : (exitPx - entryPx) * Number(t.qty)
+                                ).toFixed(2)})
                               </span>
                             </div>
                           </div>
                         )}
 
-                        {/* BUY entry info */}
-                        {!isSell && (
+                        {/* Entry info (BUY/SHORT) */}
+                        {!isExit && (
                           <div className="flex items-center gap-4 py-1 border-b border-[var(--border)]/30">
+                            {t.action === "SHORT" && (
+                              <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-orange-900/30 text-orange-400">SHORT</span>
+                            )}
                             <div className="flex items-center gap-2">
                               <span className="text-[var(--muted)]">Entry Price:</span>
                               <span className="font-mono font-bold text-[var(--text)]">{fmt$(exitPx)}</span>

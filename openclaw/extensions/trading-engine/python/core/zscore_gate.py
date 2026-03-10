@@ -111,8 +111,8 @@ class AdaptiveGate:
         self,
         zscore_threshold: float = 2.5,
         zscore_window: int = 50,
-        max_check_seconds: float = 14400,
-        min_check_seconds: float = 60.0,
+        max_check_seconds: float = 7200,
+        min_check_seconds: float = 120.0,
     ) -> None:
         self._zscore_threshold = zscore_threshold
         self._max_check_seconds = max_check_seconds
@@ -137,32 +137,18 @@ class AdaptiveGate:
         features: Dict[str, float],
         is_candle_close: bool = False,
     ) -> Tuple[bool, List[str]]:
-        """Check all gates. Returns (should_wake, reasons)."""
+        """Check all gates. Returns (should_wake, reasons).
+
+        Z-score trackers are ALWAYS updated (to keep statistics current),
+        even when cooldown blocks the wake.  All gates are peers — candle
+        close no longer short-circuits past z-score updates.
+        """
         now = time.time()
         reasons: List[str] = []
-
-        # Cooldown check — overrides everything except candle close
         in_cooldown = (now - self._last_wake_time) < self._min_check_seconds
 
-        # Gate 1: Candle close — only respect cooldown, not Claude's timer
-        # Candle close is a structural event; Claude should see it even if timer is active
-        if is_candle_close:
-            if in_cooldown:
-                self._update_prev(features)
-                return False, []
-            reasons.append("candle_close")
-            self._last_wake_time = now
-            self._update_prev(features)
-            return True, reasons
-
-        # Non-z-score gates respect cooldown
-        if not in_cooldown:
-            # Gate 2: Timer expired (routine check)
-            if self._next_check_at > 0 and now >= self._next_check_at:
-                reasons.append("timer_expired")
-
-        # Gate 3: Z-score outliers — ALWAYS active, only respects cooldown
-        # Extreme market moves must trigger immediately regardless of Claude's timer
+        # Always update z-score trackers so statistics stay current
+        zscore_alerts: List[str] = []
         for name, value in features.items():
             tracker = self._trackers.get(name)
             if tracker is None:
@@ -170,18 +156,32 @@ class AdaptiveGate:
                 self._trackers[name] = tracker
             z = tracker.update(value)
             if z is not None and abs(z) >= self._zscore_threshold:
-                if not in_cooldown:
-                    reasons.append(f"zscore:{name}={z:+.2f}")
+                zscore_alerts.append(f"zscore:{name}={z:+.2f}")
 
-        # Gate 4: Claude's wake conditions (respect cooldown, single-fire)
-        if not in_cooldown:
-            for cond in self._wake_conditions:
-                current = features.get(cond.metric)
-                previous = self._prev_features.get(cond.metric)
-                if cond.evaluate(current, previous):
-                    cond.triggered = True  # single-fire: won't re-evaluate
-                    label = cond.reason or f"{cond.metric} {cond.operator} {cond.threshold}"
-                    reasons.append(f"wake_cond:{label}")
+        # Cooldown blocks all wake events
+        if in_cooldown:
+            self._update_prev(features)
+            return False, []
+
+        # Gate 1: Candle close
+        if is_candle_close:
+            reasons.append("candle_close")
+
+        # Gate 2: Timer expired (routine check)
+        if self._next_check_at > 0 and now >= self._next_check_at:
+            reasons.append("timer_expired")
+
+        # Gate 3: Z-score outlier alerts
+        reasons.extend(zscore_alerts)
+
+        # Gate 4: Claude's wake conditions (single-fire)
+        for cond in self._wake_conditions:
+            current = features.get(cond.metric)
+            previous = self._prev_features.get(cond.metric)
+            if cond.evaluate(current, previous):
+                cond.triggered = True
+                label = cond.reason or f"{cond.metric} {cond.operator} {cond.threshold}"
+                reasons.append(f"wake_cond:{label}")
 
         self._update_prev(features)
 

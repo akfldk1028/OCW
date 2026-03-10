@@ -315,7 +315,7 @@ def build_market_context(
     if crypto_regime_detector is not None:
         try:
             crypto_regime = crypto_regime_detector.detect()
-            context["crypto_regime"] = crypto_regime.get("regime", "unknown")
+            context["crypto_regime"] = crypto_regime.get("regime_label", "unknown")
             context["exposure_scale"] = crypto_regime.get("exposure_scale", 1.0)
         except Exception:
             pass

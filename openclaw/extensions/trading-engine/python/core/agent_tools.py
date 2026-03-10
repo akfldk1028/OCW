@@ -206,6 +206,95 @@ def _calc_vwap(bars: List[tuple], n: int = 0) -> Dict[str, float]:
     }
 
 
+def _calc_supertrend(bars: List[tuple], period: int = 10, multiplier: float = 3.0) -> int:
+    """Supertrend direction: +1 (bullish) or -1 (bearish).
+
+    Uses ATR-based bands; price above upper band = bullish, below lower = bearish.
+    bars: [(ts, open, high, low, close, volume), ...]
+    """
+    if len(bars) < period + 1:
+        return 0
+    # Calculate ATR series
+    trs = []
+    for i in range(1, len(bars)):
+        h, l, prev_c = bars[i][2], bars[i][3], bars[i - 1][4]
+        trs.append(max(h - l, abs(h - prev_c), abs(l - prev_c)))
+    if len(trs) < period:
+        return 0
+    atr = sum(trs[:period]) / period
+    # Track supertrend
+    direction = 1  # start bullish
+    prev_upper = 0.0
+    prev_lower = 0.0
+    for i in range(period, len(bars)):
+        atr = (atr * (period - 1) + trs[i - 1]) / period
+        hl2 = (bars[i][2] + bars[i][3]) / 2
+        basic_upper = hl2 + multiplier * atr
+        basic_lower = hl2 - multiplier * atr
+        # Carry forward bands
+        upper = min(basic_upper, prev_upper) if prev_upper > 0 and bars[i - 1][4] <= prev_upper else basic_upper
+        lower = max(basic_lower, prev_lower) if prev_lower > 0 and bars[i - 1][4] >= prev_lower else basic_lower
+        # Direction flip
+        if direction == 1:
+            if bars[i][4] < lower:
+                direction = -1
+        else:
+            if bars[i][4] > upper:
+                direction = 1
+        prev_upper = upper
+        prev_lower = lower
+    return direction
+
+
+def _calc_mfi(bars: List[tuple], period: int = 14) -> float:
+    """Money Flow Index (0-100). Uses typical price × volume.
+
+    bars: [(ts, open, high, low, close, volume), ...]
+    """
+    if len(bars) < period + 1:
+        return 50.0
+    # Typical prices
+    tps = [(b[2] + b[3] + b[4]) / 3 for b in bars]
+    pos_flow = 0.0
+    neg_flow = 0.0
+    for i in range(-period, 0):
+        mf = tps[i] * bars[i][5]  # typical_price × volume
+        if tps[i] > tps[i - 1]:
+            pos_flow += mf
+        elif tps[i] < tps[i - 1]:
+            neg_flow += mf
+    if neg_flow == 0:
+        return 100.0
+    ratio = pos_flow / neg_flow
+    return 100.0 - (100.0 / (1.0 + ratio))
+
+
+def _calc_obv_direction(closes: List[float], volumes: List[float], lookback: int = 10) -> float:
+    """OBV vs price divergence over lookback bars.
+
+    Returns: +1.0 = bullish divergence (price down, OBV up)
+             -1.0 = bearish divergence (price up, OBV down)
+              0.0 = aligned (no divergence)
+    """
+    if len(closes) < lookback + 1 or len(volumes) < lookback + 1:
+        return 0.0
+    # Price direction
+    price_change = closes[-1] - closes[-lookback]
+    # OBV direction over lookback
+    obv_change = 0.0
+    for i in range(-lookback, 0):
+        if closes[i] > closes[i - 1]:
+            obv_change += volumes[i]
+        elif closes[i] < closes[i - 1]:
+            obv_change -= volumes[i]
+    # Divergence detection
+    if price_change > 0 and obv_change < 0:
+        return -1.0  # bearish divergence
+    elif price_change < 0 and obv_change > 0:
+        return 1.0   # bullish divergence
+    return 0.0
+
+
 def _get_bars(ticker: str, interval: str, n: int = 100) -> List[tuple]:
     """Get OHLCV bars from the runner's store."""
     if _runner is None:

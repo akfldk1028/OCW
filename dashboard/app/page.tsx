@@ -10,6 +10,7 @@ import TSWeightsCard from "@/components/ts-weights";
 import PriceTicker from "@/components/price-ticker";
 import PriceChart from "@/components/price-chart";
 import EquityCurve from "@/components/equity-curve";
+import DailyPerf from "@/components/daily-perf";
 
 export default function Home() {
   return (
@@ -35,7 +36,18 @@ export default function Home() {
       {/* Row 1: Hero Stats — big PnL numbers */}
       <HeroStats />
 
-      {/* Row 2: Charts side by side */}
+      {/* Row 2: H-TS (RL Brain) + Regime/Portfolio sidebar */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="lg:col-span-2">
+          <TSWeightsCard />
+        </div>
+        <div className="space-y-4">
+          <RegimeBadge />
+          <PortfolioCard />
+        </div>
+      </div>
+
+      {/* Row 3: Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2">
           <PriceChart />
@@ -43,31 +55,23 @@ export default function Home() {
         <EquityCurve />
       </div>
 
-      {/* Row 3: Portfolio detail + Regime */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="md:col-span-3">
-          <PortfolioCard />
-        </div>
-        <RegimeBadge />
-      </div>
+      {/* Row 3.5: Daily Performance */}
+      <DailyPerf />
 
       {/* Row 4: Positions */}
       <PositionsTable />
 
-      {/* Row 5: Decisions + TS Weights */}
+      {/* Row 5: Decisions + Trades */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2">
           <DecisionFeed />
         </div>
-        <TSWeightsCard />
+        <TradesTable />
       </div>
-
-      {/* Row 6: Trades */}
-      <TradesTable />
 
       {/* Footer */}
       <div className="text-center text-xs text-[var(--muted)] pb-4">
-        Claude Sonnet 4.6 + Thompson Sampling + Adaptive Gate
+        Claude Sonnet 4.6 + Hierarchical Thompson Sampling + Adaptive Gate
       </div>
     </main>
   );

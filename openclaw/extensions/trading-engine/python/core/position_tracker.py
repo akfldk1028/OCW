@@ -42,6 +42,7 @@ class TrackedPosition:
     # Live state (updated by fast loop)
     current_price: float = 0.0
     trailing_high: float = 0.0
+    trailing_low: float = 0.0   # short용: 최저가 추적
     last_update: float = 0.0
 
     # Context at entry (captured once)
@@ -59,12 +60,17 @@ class TrackedPosition:
 
     @property
     def pnl_pct(self) -> float:
-        """Net PnL after round-trip fees (buy + sell)."""
+        """Gross PnL (no fee deduction for open positions).
+
+        Fee is only applied at exit time in runner._on_exit.
+        Subtracting ROUND_TRIP_FEE here caused premature SL triggers
+        (e.g. -4.8% gross → -5.0% net → false stop_loss).
+        """
         if self.entry_price <= 0 or self.current_price <= 0:
             return 0.0
-        from crypto_config import ROUND_TRIP_FEE
-        gross = (self.current_price - self.entry_price) / self.entry_price
-        return gross - ROUND_TRIP_FEE
+        if self.side == "short":
+            return (self.entry_price - self.current_price) / self.entry_price
+        return (self.current_price - self.entry_price) / self.entry_price
 
     @property
     def market_value(self) -> float:
@@ -78,18 +84,57 @@ class TrackedPosition:
     def held_hours(self) -> float:
         return self.held_seconds / 3600
 
+    @property
+    def mfe(self) -> float:
+        """Maximum Favorable Excursion — best unrealized PnL during trade."""
+        if self.entry_price <= 0:
+            return 0.0
+        if self.side == "short":
+            if self.trailing_low > 0 and self.trailing_low < self.entry_price:
+                return (self.entry_price - self.trailing_low) / self.entry_price
+            return 0.0
+        if self.trailing_high > self.entry_price:
+            return (self.trailing_high - self.entry_price) / self.entry_price
+        return 0.0
+
+    @property
+    def mae(self) -> float:
+        """Maximum Adverse Excursion — worst unrealized PnL during trade."""
+        if self.entry_price <= 0:
+            return 0.0
+        if self.side == "short":
+            if self.trailing_high > self.entry_price:
+                return -(self.trailing_high - self.entry_price) / self.entry_price
+            return 0.0
+        if self.trailing_low > 0 and self.trailing_low < self.entry_price:
+            return -(self.entry_price - self.trailing_low) / self.entry_price
+        return 0.0
+
+    @property
+    def capture_ratio(self) -> float:
+        """Realized PnL / MFE — how much of the peak profit was captured."""
+        m = self.mfe
+        if m <= 0:
+            return 0.0
+        return self.pnl_pct / m
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "ticker": self.ticker,
             "broker": self.broker_name,
             "market_type": self.market_type,
+            "side": self.side,
             "entry_price": self.entry_price,
             "current_price": self.current_price,
             "pnl_pct": round(self.pnl_pct, 4),
             "qty": self.qty,
             "market_value": round(self.market_value, 2),
             "trailing_high": self.trailing_high,
+            "trailing_low": self.trailing_low,
             "held_hours": round(self.held_hours, 1),
+            "mfe": round(self.mfe, 4),
+            "mae": round(self.mae, 4),
+            "capture_ratio": round(self.capture_ratio, 4),
             "is_dca": self.is_dca,
             "entry_regime": self.entry_regime,
             "agent_verdict": self.agent_verdict,
@@ -207,8 +252,9 @@ class PositionTracker:
         regime: str = "unknown",
         momentum_z: float = 0.0,
         entry_time: Optional[datetime] = None,
+        side: str = "long",
     ) -> TrackedPosition:
-        """Start tracking a new position after BUY execution."""
+        """Start tracking a new position after BUY/SHORT execution."""
         pos = TrackedPosition(
             ticker=ticker,
             broker_name=broker,
@@ -216,15 +262,17 @@ class PositionTracker:
             entry_price=entry_price,
             entry_time=entry_time or datetime.now(),
             qty=qty,
+            side=side,
             current_price=entry_price,
             trailing_high=entry_price,
+            trailing_low=entry_price,
             entry_regime=regime,
             entry_momentum_z=momentum_z,
         )
         self._positions[ticker] = pos
         logger.info(
-            "[tracker] Now tracking %s: %.4f x %.6f via %s (regime=%s)",
-            ticker, entry_price, qty, broker, regime,
+            "[tracker] Now tracking %s %s: %.4f x %.6f via %s (regime=%s)",
+            side.upper(), ticker, entry_price, qty, broker, regime,
         )
         return pos
 
@@ -306,9 +354,11 @@ class PositionTracker:
             pos.current_price = price
             pos.last_update = time.time()
 
-            # Update trailing high
+            # Update trailing high/low
             if price > pos.trailing_high:
                 pos.trailing_high = price
+            if pos.trailing_low <= 0 or price < pos.trailing_low:
+                pos.trailing_low = price
 
             # Check safety rules
             reason = self._check_safety_rules(pos)
@@ -322,33 +372,39 @@ class PositionTracker:
                 if move_pct > 0.005:
                     await self._publish_update(pos)
 
-        # Execute exits
+        # Execute exits (respect backoff from previous failures)
         for ticker, pos, reason in exits:
+            backoff_until = getattr(pos, "_exit_backoff_until", 0)
+            if time.time() < backoff_until:
+                logger.debug("[tracker] %s exit backoff active (%ds left)",
+                             ticker, int(backoff_until - time.time()))
+                continue
             await self._execute_exit(pos, reason, source="safety")
 
     def _check_safety_rules(self, pos: TrackedPosition) -> Optional[str]:
         """Rule-based safety checks. Returns reason string or None.
 
+        CATASTROPHIC-ONLY safety — agent exits earlier via RL.
         Two modes based on position type:
-        - Scalp (BUY only): Tight SL -0.7%, trail +0.4%/0.2%, hold 45min
-        - DCA (after ADD):  Wider SL -1.5%, trail +0.8%/0.4%, hold 2h
-          DCA needs room for the averaging-down thesis to play out.
+        - Scalp (BUY only): SL -5%, trail +2%/1%, hold 4h
+        - DCA (after ADD):  SL -5%, trail +3%/1.5%, hold 4h
         """
         cfg = CRYPTO_RISK_CONFIG if pos.market_type == "crypto" else RISK_CONFIG
         pnl = pos.pnl_pct
 
         # Select SL/trail/hold based on position type (scalp vs DCA)
+        # Fallback defaults MUST match current catastrophic policy (not old tight values)
         if pos.is_dca:
-            sl = cfg.get("dca_stop_loss_pct", -0.015)
-            trail_act = cfg.get("dca_trail_activation_pct", 0.008)
-            trail_width = cfg.get("dca_trail_width_pct", 0.004)
-            max_hold = cfg.get("dca_max_hold_hours", 2.0)
+            sl = cfg.get("dca_stop_loss_pct", -0.05)
+            trail_act = cfg.get("dca_trail_activation_pct", 0.03)
+            trail_width = cfg.get("dca_trail_width_pct", 0.015)
+            max_hold = cfg.get("dca_max_hold_hours", 4.0)
             mode = "dca"
         else:
-            sl = cfg.get("stop_loss_pct", -0.007)
-            trail_act = cfg.get("scalp_trail_activation_pct", 0.004)
-            trail_width = cfg.get("scalp_trail_width_pct", 0.002)
-            max_hold = cfg.get("max_hold_hours", 0.75)
+            sl = cfg.get("stop_loss_pct", -0.05)
+            trail_act = cfg.get("scalp_trail_activation_pct", 0.02)
+            trail_width = cfg.get("scalp_trail_width_pct", 0.01)
+            max_hold = cfg.get("max_hold_hours", 4.0)
             mode = "scalp"
 
         # 1. Hard stop loss (unconditional — protects against flash crash)
@@ -360,39 +416,67 @@ class PositionTracker:
         if pnl >= tp:
             return f"take_profit ({pnl:+.2%} >= {tp:+.2%})"
 
-        if pos.trailing_high > pos.entry_price:
-            peak_pnl = (pos.trailing_high - pos.entry_price) / pos.entry_price
+        # Trailing stop logic — direction-aware (long vs short)
+        if pos.side == "short":
+            # SHORT: trailing uses trailing_low (price going down = profit)
+            if pos.trailing_low > 0 and pos.trailing_low < pos.entry_price:
+                peak_pnl = (pos.entry_price - pos.trailing_low) / pos.entry_price
 
-            # 3. Trailing stop (tight for scalp, wider for DCA)
-            if peak_pnl >= trail_act:
-                trail_stop = pos.trailing_high * (1 - trail_width)
-                if pos.current_price <= trail_stop:
-                    locked_pnl = (trail_stop - pos.entry_price) / pos.entry_price
-                    return (
-                        f"{mode}_trail (peak={peak_pnl:+.2%}, "
-                        f"locked≈{locked_pnl:+.2%}, width={trail_width:.2%})"
-                    )
+                # 3. Trailing stop (tight for scalp, wider for DCA)
+                if peak_pnl >= trail_act:
+                    trail_stop = pos.trailing_low * (1 + trail_width)
+                    if pos.current_price >= trail_stop:
+                        locked_pnl = (pos.entry_price - trail_stop) / pos.entry_price
+                        return (
+                            f"{mode}_trail (peak={peak_pnl:+.2%}, "
+                            f"locked≈{locked_pnl:+.2%}, width={trail_width:.2%})"
+                        )
 
-            # 4. Swing trailing stop (wide — for rare big runners)
-            try:
-                from crypto_config import ACTIVE_BLEND_CONFIG
-                trail_pct = ACTIVE_BLEND_CONFIG.get("trail_pct", 0.06)
-                trail_activation = ACTIVE_BLEND_CONFIG.get("trail_activation_pct", 0.04)
-            except ImportError:
+                # 4. Swing trailing stop (wide — for rare big runners)
                 trail_pct = cfg.get("trail_pct", 0.06)
                 trail_activation = cfg.get("trail_activation_pct", 0.04)
 
-            if peak_pnl >= trail_activation:
-                trail_stop = pos.trailing_high * (1 - trail_pct)
-                if pos.current_price <= trail_stop:
-                    drop = (pos.current_price - pos.trailing_high) / pos.trailing_high
-                    return f"trailing_stop ({drop:+.1%} from high {pos.trailing_high:.2f})"
+                if peak_pnl >= trail_activation:
+                    trail_stop = pos.trailing_low * (1 + trail_pct)
+                    if pos.current_price >= trail_stop:
+                        rise = (pos.current_price - pos.trailing_low) / pos.trailing_low
+                        return f"trailing_stop ({rise:+.1%} from low {pos.trailing_low:.2f})"
 
-            # 5. Profit protection: don't let winners become losers
-            pp_peak = cfg.get("profit_protect_peak_pct", 0.003)
-            pp_floor = cfg.get("profit_protect_floor_pct", 0.001)
-            if peak_pnl >= pp_peak and pnl < pp_floor:
-                return f"profit_protect (peak={peak_pnl:+.2%}, now={pnl:+.2%})"
+                # 5. Profit protection: don't let winners become losers
+                pp_peak = cfg.get("profit_protect_peak_pct", 0.003)
+                pp_floor = cfg.get("profit_protect_floor_pct", 0.001)
+                if peak_pnl >= pp_peak and pnl < pp_floor:
+                    return f"profit_protect (peak={peak_pnl:+.2%}, now={pnl:+.2%})"
+        else:
+            # LONG: trailing uses trailing_high (price going up = profit)
+            if pos.trailing_high > pos.entry_price:
+                peak_pnl = (pos.trailing_high - pos.entry_price) / pos.entry_price
+
+                # 3. Trailing stop (tight for scalp, wider for DCA)
+                if peak_pnl >= trail_act:
+                    trail_stop = pos.trailing_high * (1 - trail_width)
+                    if pos.current_price <= trail_stop:
+                        locked_pnl = (trail_stop - pos.entry_price) / pos.entry_price
+                        return (
+                            f"{mode}_trail (peak={peak_pnl:+.2%}, "
+                            f"locked≈{locked_pnl:+.2%}, width={trail_width:.2%})"
+                        )
+
+                # 4. Swing trailing stop (wide — for rare big runners)
+                trail_pct = cfg.get("trail_pct", 0.06)
+                trail_activation = cfg.get("trail_activation_pct", 0.04)
+
+                if peak_pnl >= trail_activation:
+                    trail_stop = pos.trailing_high * (1 - trail_pct)
+                    if pos.current_price <= trail_stop:
+                        drop = (pos.current_price - pos.trailing_high) / pos.trailing_high
+                        return f"trailing_stop ({drop:+.1%} from high {pos.trailing_high:.2f})"
+
+                # 5. Profit protection: don't let winners become losers
+                pp_peak = cfg.get("profit_protect_peak_pct", 0.003)
+                pp_floor = cfg.get("profit_protect_floor_pct", 0.001)
+                if peak_pnl >= pp_peak and pnl < pp_floor:
+                    return f"profit_protect (peak={peak_pnl:+.2%}, now={pnl:+.2%})"
 
         # 6. Time stop (45min scalp / 2h DCA)
         if pos.held_hours > max_hold:
@@ -500,12 +584,19 @@ class PositionTracker:
         if pos.ticker not in self._positions:
             logger.info("[tracker] %s already exited, skipping %s exit", pos.ticker, source)
             return
+        # Guard: verify it's the same position object (not a re-entry)
+        current_pos = self._positions.get(pos.ticker)
+        if current_pos is not pos:
+            logger.info("[tracker] %s position object changed, skipping stale %s exit", pos.ticker, source)
+            return
+        exit_action = "COVER" if pos.side == "short" else "SELL"
         decision = {
             "ticker": pos.ticker,
-            "action": "SELL",
+            "action": exit_action,
             "confidence": -1.0,
             "position_size_usd": pos.market_value,
             "price": pos.current_price,
+            "qty": pos.qty,
             "reasons": [f"{source}_{reason}"],
         }
 
@@ -514,7 +605,7 @@ class PositionTracker:
             source, pos.ticker, reason, pos.pnl_pct * 100, pos.held_hours,
         )
 
-        # Execute via broker
+        # Execute via broker (with backoff on failure)
         executor = self._exit_executors.get(pos.broker_name)
         if executor:
             try:
@@ -522,11 +613,19 @@ class PositionTracker:
                 if asyncio.iscoroutine(result):
                     result = await result
                 logger.info("[tracker] Exit executed for %s: %s", pos.ticker, result)
+                # Reset failure count on success
+                pos._exit_failures = 0
             except Exception as exc:
-                logger.error("[tracker] Exit execution failed for %s: %s", pos.ticker, exc)
+                # Backoff: skip subsequent exit attempts with exponential delay
+                failures = getattr(pos, "_exit_failures", 0) + 1
+                pos._exit_failures = failures
+                backoff_s = min(30 * (2 ** (failures - 1)), 300)  # 30s, 60s, 120s, 240s, 300s max
+                pos._exit_backoff_until = time.time() + backoff_s
+                logger.error("[tracker] Exit failed for %s (attempt %d, backoff %ds): %s",
+                             pos.ticker, failures, backoff_s, exc)
                 return  # DO NOT untrack — position still exists on exchange
 
-        # Publish exit event
+        # Publish exit event (include position_side — handler runs async after untrack)
         await self._bus.publish("position.exit", {
             "ticker": pos.ticker,
             "source": source,
@@ -537,6 +636,10 @@ class PositionTracker:
             "held_hours": pos.held_hours,
             "qty": pos.qty,
             "broker": pos.broker_name,
+            "position_side": pos.side,
+            "mfe": pos.mfe,
+            "mae": pos.mae,
+            "capture_ratio": pos.capture_ratio,
         })
 
         # Remove from tracking

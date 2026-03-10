@@ -20,6 +20,7 @@ import asyncio
 import csv
 import json
 import logging
+import math
 import time
 from io import StringIO
 from pathlib import Path
@@ -66,6 +67,19 @@ async def health():
     return {"status": "ok", "time": time.time()}
 
 
+@app.post("/api/force-wake")
+async def force_wake():
+    """Force gate to wake immediately for a decision cycle."""
+    r = _runner
+    if r is None:
+        return {"error": "runner not ready"}
+    gate = getattr(r, 'adaptive_gate', None)
+    if gate:
+        gate._next_check_at = time.time()
+        return {"status": "ok", "message": "gate timer reset to now"}
+    return {"error": "gate not found"}
+
+
 @app.get("/api/status")
 async def status():
     """Portfolio value, positions, regime, gate state."""
@@ -79,14 +93,23 @@ async def status():
         tracked = r.position_tracker.get_position(tic)
         if tracked and tracked.qty > 0:
             current_px = r._last_tick_prices.get(tic, entry_px)
-            pnl_pct = (current_px / entry_px - 1) if entry_px > 0 else 0
+            side = getattr(tracked, "side", "long")
+            if entry_px > 0:
+                if side == "short":
+                    pnl_pct = (entry_px - current_px) / entry_px
+                else:
+                    pnl_pct = (current_px - entry_px) / entry_px
+            else:
+                pnl_pct = 0
             positions[tic] = {
                 "entry_price": entry_px,
                 "current_price": current_px,
                 "qty": tracked.qty,
+                "side": side,
                 "pnl_pct": round(pnl_pct, 6),
                 "held_hours": round(tracked.held_hours, 1),
                 "trailing_high": tracked.trailing_high,
+                "trailing_low": getattr(tracked, "trailing_low", 0.0),
             }
 
     # Regime
@@ -120,7 +143,7 @@ async def status():
             with open(csv_path, "r", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    if row.get("action") != "SELL":
+                    if row.get("action") not in ("SELL", "COVER"):
                         continue
                     ts = row.get("timestamp", "")
                     if ts[:10] == today_str:
@@ -141,7 +164,7 @@ async def status():
         "position_count": len(positions),
         "crypto_regime": crypto_regime,
         "macro_regime": macro_regime,
-        "combined_regime": f"{crypto_regime}_{macro_regime}",
+        "combined_regime": getattr(r, '_last_combined_regime', f"{crypto_regime}_{macro_regime}"),
         "fear_greed_index": fg_idx,
         "fear_greed_label": fg_label,
         "gate": gate_info,
@@ -197,8 +220,9 @@ async def trades(limit: int = Query(100, ge=1, le=1000)):
                         pass
             rows.append(row)
 
-    # Pair BUY→SELL: attach entry_price to SELL rows
+    # Pair BUY→SELL and SHORT→COVER: attach entry_price to exit rows
     last_buy_price: dict[str, float] = {}
+    last_short_price: dict[str, float] = {}
     for row in rows:
         ticker = row.get("ticker", "")
         action = row.get("action", "")
@@ -212,14 +236,18 @@ async def trades(limit: int = Query(100, ge=1, le=1000)):
             last_buy_price[ticker] = price
         elif action == "SELL" and ticker in last_buy_price:
             row["entry_price"] = last_buy_price.pop(ticker)
+        elif action == "SHORT":
+            last_short_price[ticker] = price
+        elif action == "COVER" and ticker in last_short_price:
+            row["entry_price"] = last_short_price.pop(ticker)
 
     # Return most recent N
     recent = rows[-limit:]
     recent.reverse()
 
-    # Summary stats — only count SELL trades (completed round-trips)
-    sells = [r for r in rows if r.get("action") == "SELL"]
-    sell_pnls = [r.get("pnl_pct", 0) for r in sells if isinstance(r.get("pnl_pct"), (int, float))]
+    # Summary stats — count SELL and COVER trades (completed round-trips)
+    exits = [r for r in rows if r.get("action") in ("SELL", "COVER")]
+    sell_pnls = [r.get("pnl_pct", 0) for r in exits if isinstance(r.get("pnl_pct"), (int, float))]
     total_pnl = sum(sell_pnls)
     win_count = sum(1 for p in sell_pnls if p > 0)
     loss_count = sum(1 for p in sell_pnls if p < 0)
@@ -229,7 +257,7 @@ async def trades(limit: int = Query(100, ge=1, le=1000)):
         "trades": recent,
         "total": len(rows),
         "summary": {
-            "total_trades": len(sells),
+            "total_trades": len(exits),
             "wins": win_count,
             "losses": loss_count,
             "win_rate": round(win_count / max(completed, 1), 4),
@@ -261,9 +289,12 @@ async def ts_weights():
         "version": status.get("version", 1),
         "current_regime": combined,
         "mean_weights": r.online_learner.get_mean_weights(regime=combined),
+        "signal_reliability": r.online_learner.get_signal_reliability(regime=combined),
         "group_weights": r.online_learner.get_group_weights(regime=combined),
         "meta_params": r.online_learner.get_meta_param_means(regime=combined),
         "meta_params_global": status.get("meta_param_means_global", {}),
+        "meta_param_betas": r.online_learner.get_meta_param_betas(regime=combined),
+        "meta_param_betas_global": r.online_learner.get_meta_param_betas_global(),
         "group_summary": status.get("group_summary", {}),
         "regime_info": status.get("regime_info", {}),
         "num_groups": status.get("num_groups", 0),
@@ -278,6 +309,7 @@ async def ts_weights():
 @app.get("/api/price-history")
 async def price_history(
     ticker: str = Query("BTC/USDT"),
+    timeframe: str = Query("1h", description="Candle interval: 5m, 15m, 1h"),
     limit: int = Query(200, ge=1, le=500),
 ):
     """OHLCV candle data from the in-memory ohlcv_store."""
@@ -285,24 +317,25 @@ async def price_history(
     if r is None:
         return JSONResponse({"error": "runner not initialized"}, status_code=503)
 
-    store = r.ohlcv_store
-    df = store.get(ticker, "1h")
-    if df is None or df.empty:
-        return {"ticker": ticker, "timeframe": "1h", "candles": []}
+    if timeframe not in ("5m", "15m", "1h"):
+        timeframe = "1h"
 
-    df = df.tail(limit)
+    bars = r.ohlcv_store.get_bars(ticker, timeframe, limit)
+    if not bars:
+        return {"ticker": ticker, "timeframe": timeframe, "candles": []}
+
     candles = []
-    for ts, row in df.iterrows():
+    for ts_ms, o, h, l, c, v in bars:
         candles.append({
-            "time": str(ts),
-            "open": round(float(row.get("open", 0)), 2),
-            "high": round(float(row.get("high", 0)), 2),
-            "low": round(float(row.get("low", 0)), 2),
-            "close": round(float(row.get("close", 0)), 2),
-            "volume": round(float(row.get("volume", 0)), 2),
+            "time": time.strftime("%Y-%m-%d %H:%M", time.gmtime(ts_ms / 1000)),
+            "open": round(float(o), 2),
+            "high": round(float(h), 2),
+            "low": round(float(l), 2),
+            "close": round(float(c), 2),
+            "volume": round(float(v), 2),
         })
 
-    return {"ticker": ticker, "timeframe": "1h", "candles": candles}
+    return {"ticker": ticker, "timeframe": timeframe, "candles": candles}
 
 
 @app.get("/api/equity-curve")
@@ -369,7 +402,7 @@ async def daily_pnl():
             rows.append(row)
 
     for row in rows:
-        if row.get("action") != "SELL":
+        if row.get("action") not in ("SELL", "COVER"):
             continue
         try:
             pnl = float(row.get("pnl_pct", 0))
@@ -391,6 +424,19 @@ async def daily_pnl():
             d["losses"] += 1
         d["best_trade"] = max(d["best_trade"], pnl)
         d["worst_trade"] = min(d["worst_trade"], pnl)
+
+    # Fill in missing dates up to today so dashboard always shows continuous days
+    from datetime import date as date_cls, timedelta
+    today_str = date_cls.today().isoformat()
+    if daily:
+        first_date = min(daily.keys())
+        cur = date_cls.fromisoformat(first_date)
+        end = date_cls.today()
+        while cur <= end:
+            ds = cur.isoformat()
+            if ds not in daily:
+                daily[ds]  # creates default entry via defaultdict
+            cur += timedelta(days=1)
 
     # Build sorted list
     days = []
@@ -427,6 +473,208 @@ async def daily_pnl():
             "current_portfolio_value": current_value,
             "initial_balance": round(getattr(r, "_initial_balance", 0), 2) if r else 0,
         },
+    }
+
+
+# ------------------------------------------------------------------
+# Tool endpoints — for Claude MCP tool calls
+# ------------------------------------------------------------------
+
+def _ta_helpers():
+    """Lazy-import TA helpers from agent_tools (pure Python, no SDK dependency)."""
+    from core.agent_tools import (
+        _calc_rsi, _calc_ema, _calc_ema_series, _calc_stoch_rsi,
+        _calc_macd, _calc_bollinger, _calc_atr, _calc_vwap,
+    )
+    return _calc_rsi, _calc_ema, _calc_ema_series, _calc_stoch_rsi, _calc_macd, _calc_bollinger, _calc_atr, _calc_vwap
+
+
+def _get_bars(ticker: str, interval: str, n: int = 200) -> List[tuple]:
+    """Get OHLCV bars from runner's ohlcv_store."""
+    if _runner is None:
+        return []
+    return _runner.ohlcv_store.get_bars(ticker, interval, n)
+
+
+@app.get("/api/tools/ta")
+async def tools_ta(
+    ticker: str = Query("BTC/USDT:USDT"),
+    interval: str = Query("5m", description="Candle interval: 5m, 15m, 1h"),
+    indicators: str = Query("all", description="Comma-separated: rsi,macd,ema_cross,bollinger,stoch_rsi,atr,vwap,all"),
+    rsi_period: int = Query(7, ge=2, le=50),
+    ema_fast: int = Query(9, ge=2, le=100),
+    ema_slow: int = Query(21, ge=2, le=200),
+):
+    """Technical analysis — run TA indicators with custom params on any ticker/timeframe."""
+    if interval not in ("5m", "15m", "1h"):
+        interval = "5m"
+
+    bars = _get_bars(ticker, interval, 200)
+    if not bars:
+        return JSONResponse({"error": f"No OHLCV data for {ticker}/{interval}"}, status_code=404)
+
+    closes = [b[4] for b in bars if b[4] > 0]
+    if len(closes) < 5:
+        return JSONResponse({"error": f"Insufficient data: {len(closes)} bars"}, status_code=404)
+
+    calc_rsi, calc_ema, _, calc_stoch_rsi, calc_macd, calc_bollinger, calc_atr, calc_vwap = _ta_helpers()
+
+    ind_list = [s.strip() for s in indicators.split(",")]
+    do_all = "all" in ind_list
+
+    result: Dict[str, Any] = {"ticker": ticker, "interval": interval, "bar_count": len(bars)}
+
+    if do_all or "rsi" in ind_list:
+        result["rsi"] = round(calc_rsi(closes, rsi_period), 2)
+        result["rsi_period"] = rsi_period
+
+    if do_all or "stoch_rsi" in ind_list:
+        result["stoch_rsi"] = round(calc_stoch_rsi(closes), 2)
+
+    if do_all or "macd" in ind_list:
+        result["macd"] = calc_macd(closes)
+
+    if do_all or "ema_cross" in ind_list:
+        ema_f = calc_ema(closes, ema_fast)
+        ema_s = calc_ema(closes, ema_slow)
+        cross = "bullish" if ema_f > ema_s else "bearish"
+        gap_pct = (ema_f - ema_s) / ema_s if ema_s > 0 else 0
+        result["ema_cross"] = {
+            "status": cross,
+            f"ema_{ema_fast}": round(ema_f, 2),
+            f"ema_{ema_slow}": round(ema_s, 2),
+            "gap_pct": round(gap_pct, 6),
+        }
+
+    if do_all or "bollinger" in ind_list:
+        result["bollinger"] = calc_bollinger(closes)
+
+    if do_all or "atr" in ind_list:
+        atr = calc_atr(bars)
+        atr_pct = atr / closes[-1] if closes[-1] > 0 else 0
+        result["atr"] = round(atr, 2)
+        result["atr_pct"] = round(atr_pct, 6)
+
+    if do_all or "vwap" in ind_list:
+        result["vwap"] = calc_vwap(bars, n=50)
+
+    result["last_close"] = round(closes[-1], 2)
+    result["last_5_closes"] = [round(c, 2) for c in closes[-5:]]
+    return result
+
+
+@app.get("/api/tools/trades")
+async def tools_trades(
+    ticker: Optional[str] = Query(None, description="Filter by ticker"),
+    regime: Optional[str] = Query(None, description="Filter by regime"),
+    limit: int = Query(20, ge=1, le=50),
+    winners_only: bool = Query(False),
+    losers_only: bool = Query(False),
+    side: Optional[str] = Query(None, description="Filter by side: long or short"),
+):
+    """Search past trades — filter by ticker, regime, side, winners/losers."""
+    r = _runner
+    if r is None:
+        return JSONResponse({"error": "runner not initialized"}, status_code=503)
+
+    status = r.online_learner.get_status()
+    all_trades = status.get("recent_trades", [])
+
+    filtered = all_trades
+    if ticker:
+        filtered = [t for t in filtered if ticker.lower() in t.get("ticker", "").lower()]
+    if regime:
+        filtered = [t for t in filtered if regime in t.get("regime", "")]
+    if winners_only:
+        filtered = [t for t in filtered if t.get("pnl_pct", 0) > 0]
+    if losers_only:
+        filtered = [t for t in filtered if t.get("pnl_pct", 0) < 0]
+    if side:
+        filtered = [t for t in filtered if t.get("position_side", "long") == side.lower()]
+
+    filtered = filtered[-limit:]
+
+    pnls = [t.get("pnl_pct", 0) for t in filtered]
+    wins = sum(1 for p in pnls if p > 0)
+    losses = sum(1 for p in pnls if p < 0)
+
+    return {
+        "trades": filtered,
+        "count": len(filtered),
+        "summary": {
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(wins / max(len(pnls), 1), 3),
+            "total_pnl_pct": round(sum(pnls), 4),
+        },
+    }
+
+
+@app.get("/api/tools/volume")
+async def tools_volume(
+    ticker: str = Query("BTC/USDT:USDT"),
+    interval: str = Query("5m", description="Candle interval: 5m, 15m, 1h"),
+    lookback: int = Query(50, ge=10, le=200),
+):
+    """Volume analysis — relative volume, buy/sell pressure, divergence, volume profile."""
+    if interval not in ("5m", "15m", "1h"):
+        interval = "5m"
+
+    bars = _get_bars(ticker, interval, lookback)
+    if len(bars) < 10:
+        return JSONResponse({"error": f"Insufficient data: {len(bars)} bars"}, status_code=404)
+
+    volumes = [b[5] for b in bars]
+    closes = [b[4] for b in bars]
+
+    # Relative volume (current vs 20-bar average)
+    avg_vol_20 = sum(volumes[-20:]) / min(len(volumes), 20) if volumes else 0
+    rel_vol = volumes[-1] / avg_vol_20 if avg_vol_20 > 0 else 1.0
+
+    # Buy/sell pressure (green vs red bar volume)
+    green_vol = sum(b[5] for b in bars[-20:] if b[4] >= b[1])
+    red_vol = sum(b[5] for b in bars[-20:] if b[4] < b[1])
+    total_vol = green_vol + red_vol
+    buy_pressure = green_vol / total_vol if total_vol > 0 else 0.5
+
+    # Volume trend (5-bar vs previous 5-bar)
+    if len(volumes) >= 10:
+        recent_avg = sum(volumes[-5:]) / 5
+        prev_avg = sum(volumes[-10:-5]) / 5
+        vol_trend_ratio = recent_avg / prev_avg if prev_avg > 0 else 1.0
+    else:
+        vol_trend_ratio = 1.0
+
+    # Volume-price divergence
+    price_change = (closes[-1] - closes[-5]) / closes[-5] if len(closes) >= 5 and closes[-5] > 0 else 0
+    vol_change = (volumes[-1] - volumes[-5]) / volumes[-5] if len(volumes) >= 5 and volumes[-5] > 0 else 0
+    if price_change > 0 and vol_change < -0.2:
+        divergence = "bearish_divergence"
+    elif price_change < 0 and vol_change > 0.2:
+        divergence = "possible_capitulation"
+    elif price_change > 0 and vol_change > 0.2:
+        divergence = "bullish_confirmation"
+    else:
+        divergence = "neutral"
+
+    # Volume profile (top price levels by volume)
+    price_vol: Dict[float, float] = {}
+    for bar in bars:
+        mid = (bar[2] + bar[3]) / 2
+        bucket = round(mid, -int(math.log10(mid)) + 2) if mid > 0 else 0
+        price_vol[bucket] = price_vol.get(bucket, 0) + bar[5]
+    top_levels = sorted(price_vol.items(), key=lambda x: -x[1])[:5]
+
+    return {
+        "ticker": ticker,
+        "interval": interval,
+        "current_volume": round(volumes[-1], 2),
+        "avg_volume_20": round(avg_vol_20, 2),
+        "relative_volume": round(rel_vol, 3),
+        "buy_pressure": round(buy_pressure, 3),
+        "volume_trend_ratio": round(vol_trend_ratio, 3),
+        "divergence": divergence,
+        "high_volume_levels": [{"price": round(p, 2), "volume": round(v, 2)} for p, v in top_levels],
     }
 
 
