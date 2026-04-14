@@ -20,7 +20,8 @@ class SamplingMixin:
         if not self.has_enough_data:
             return self._default_weights()
 
-        eff_regime = self._effective_regime(regime)
+        sig_regime = self.signal_regime_key(regime)
+        eff_regime = self._effective_regime(sig_regime)
         group_betas = self._group_betas[eff_regime]
         signal_betas = self._signal_betas[eff_regime]
 
@@ -55,7 +56,8 @@ class SamplingMixin:
         if not self.has_enough_data:
             return self._default_weights()
 
-        eff_regime = self._effective_regime(regime)
+        sig_regime = self.signal_regime_key(regime)
+        eff_regime = self._effective_regime(sig_regime)
         group_betas = self._group_betas[eff_regime]
         signal_betas = self._signal_betas[eff_regime]
 
@@ -84,7 +86,8 @@ class SamplingMixin:
 
     def get_signal_reliability(self, regime: str = "unknown") -> Dict[str, float]:
         """Raw Beta means for each signal (0.0-1.0). NOT normalized."""
-        eff_regime = self._effective_regime(regime)
+        sig_regime = self.signal_regime_key(regime)
+        eff_regime = self._effective_regime(sig_regime)
         signal_betas = self._signal_betas[eff_regime]
 
         result: Dict[str, float] = {}
@@ -96,7 +99,8 @@ class SamplingMixin:
 
     def get_group_weights(self, regime: str = "unknown") -> Dict[str, float]:
         """Get group-level mean weights only (for dashboard summary)."""
-        eff_regime = self._effective_regime(regime)
+        sig_regime = self.signal_regime_key(regime)
+        eff_regime = self._effective_regime(sig_regime)
         group_betas = self._group_betas[eff_regime]
         raw = {g: gb.mean for g, gb in group_betas.items()}
         total = sum(raw.values())

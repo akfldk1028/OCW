@@ -74,7 +74,7 @@ for _g, _sigs in SIGNAL_GROUPS.items():
 GROUP_NAMES: List[str] = list(SIGNAL_GROUPS.keys())
 
 # Level 0: Meta-parameters — "how to trade" per regime
-# Each is a Beta(2,2) prior, mean=0.5. Interpretation depends on param:
+# Each is a Beta(1,1) uniform prior, mean=0.5. Interpretation depends on param:
 #   position_scale:      low mean → size down, high mean → size up
 #   entry_selectivity:   low mean → broad entry, high mean → picky
 #   hold_patience:       low mean → quick exit, high mean → hold longer

@@ -50,6 +50,7 @@ class OODDetector:
         self._feature_names: list = []
         self._mean: Optional[np.ndarray] = None
         self._inv_cov: Optional[np.ndarray] = None
+        self._inv_cov_diag: Optional[np.ndarray] = None
         self._update_count: int = 0
 
     def update(self, features: Dict[str, float]) -> None:
@@ -61,16 +62,11 @@ class OODDetector:
         if not features:
             return
 
-        # Expand feature set if new keys appear (TA signals are conditional).
-        # When dimensions change, old observations can't be remapped, so clear
-        # and let the window rebuild naturally from new observations.
-        new_keys = set(features.keys()) - set(self._feature_names)
-        if new_keys:
-            self._feature_names = sorted(set(self._feature_names) | new_keys)
-            self._observations.clear()
-            self._mean = None
-            self._inv_cov = None
-            self._update_count = 0
+        # On first call, lock the feature set from the first observation.
+        # After that, ignore new keys — just fill missing with 0.0.
+        # This prevents constant window resets from conditional signals.
+        if not self._feature_names:
+            self._feature_names = sorted(features.keys())
 
         # Build vector in consistent order, filling missing with 0.0
         vec = [features.get(name, 0.0) for name in self._feature_names]
@@ -98,19 +94,47 @@ class OODDetector:
         mahal_sq = diff @ self._inv_cov @ diff
         if mahal_sq < 0:
             return 0.0  # numerical artifact
-        return float(np.sqrt(mahal_sq))
+        # Cap at 50 — anything above is equally "extreme OOD"
+        return min(50.0, float(np.sqrt(mahal_sq)))
+
+    def score_decomposed(self, features: Dict[str, float]) -> Optional[Tuple[float, float, float]]:
+        """Kinlaw-Turkington turbulence decomposition.
+
+        Decomposes Mahalanobis distance into magnitude surprise (large moves)
+        and correlation surprise (structural breaks). Magnitude-only = opportunity,
+        correlation break = danger.
+
+        Returns: (total, magnitude_surprise, correlation_surprise) or None.
+        """
+        if self._mean is None or self._inv_cov is None or self._inv_cov_diag is None:
+            return None
+        vec = np.array([features.get(name, 0.0) for name in self._feature_names])
+        diff = vec - self._mean
+        total = min(50.0, float(np.sqrt(max(0.0, diff @ self._inv_cov @ diff))))
+        magnitude = min(50.0, float(np.sqrt(max(0.0, diff @ self._inv_cov_diag @ diff))))
+        correlation = total / magnitude if magnitude > 0.01 else 1.0
+        return (total, magnitude, correlation)
 
     def is_ood(self, features: Dict[str, float]) -> Tuple[bool, float]:
         """Check if features are OOD.
+
+        Uses Kinlaw-Turkington decomposition when available:
+        OOD = correlation break (structural danger), NOT magnitude-only (big move).
 
         Returns:
             (is_ood: bool, distance: float). Distance is 0.0 if
             insufficient data for scoring.
         """
-        dist = self.score(features)
-        if dist is None:
-            return False, 0.0
-        return dist > self._threshold, dist
+        decomposed = self.score_decomposed(features)
+        if decomposed is None:
+            dist = self.score(features)
+            if dist is None:
+                return False, 0.0
+            return dist > self._threshold, dist
+        total, magnitude, correlation = decomposed
+        # OOD = correlation break (structural risk). Magnitude-only (big move) is NOT OOD
+        is_dangerous = correlation > 1.5 and total > self._threshold
+        return is_dangerous, total
 
     def _recompute(self) -> None:
         """Recompute mean and inverse covariance from rolling window."""
@@ -126,14 +150,24 @@ class OODDetector:
         if cov.ndim == 0:
             cov = np.array([[float(cov)]])
 
-        # Regularize for numerical stability
-        cov += np.eye(d) * 1e-6
+        # Regularize for numerical stability — scale with median variance
+        # to handle zero-variance features (fixed signals like ±0.5)
+        med_var = max(np.median(np.diag(cov)), 1e-4)
+        cov += np.eye(d) * med_var * 0.01
+
+        # Kinlaw & Turkington (2013) — diagonal-only cov for magnitude surprise
+        diag_cov = np.diag(np.diag(cov))
+        try:
+            self._inv_cov_diag = np.linalg.inv(diag_cov)
+        except np.linalg.LinAlgError:
+            self._inv_cov_diag = np.linalg.pinv(diag_cov)
 
         try:
             self._inv_cov = np.linalg.inv(cov)
         except np.linalg.LinAlgError:
             # Singular matrix — use pseudo-inverse
             self._inv_cov = np.linalg.pinv(cov)
+            self._inv_cov_diag = np.linalg.pinv(diag_cov)
             logger.debug("[ood] Covariance singular, using pseudo-inverse")
 
     def get_status(self) -> Dict:

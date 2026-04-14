@@ -41,7 +41,7 @@ export default function PriceChart() {
 
     // 1. Fetch historical 1m klines (last 200 candles)
     fetch(
-      `https://api.binance.com/api/v3/klines?symbol=${ticker.symbol.toUpperCase()}&interval=1m&limit=200`
+      `/api/binance/v3/klines?symbol=${ticker.symbol.toUpperCase()}&interval=1m&limit=200`
     )
       .then((r) => r.json())
       .then((klines: number[][]) => {

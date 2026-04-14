@@ -41,7 +41,7 @@ class RecordingMixin:
     ) -> Dict[str, Any]:
         """Record a completed trade and update group + signal + meta posteriors.
 
-        Trades held < 5 minutes are recorded but DO NOT update posteriors.
+        Trades held < 5 minutes skip signal/group updates but still learn meta-params.
         """
         now = time.time()
         record = TradeRecord(
@@ -60,24 +60,30 @@ class RecordingMixin:
         self._trades.append(record)
         self._total_pnl += pnl_pct
 
-        # Skip posterior update for trades held < 5 minutes (artifacts)
-        if held_hours < 5.0 / 60.0:
-            logger.info("[h-ts] Trade #%d: %s skipped posterior update (held %.1f min < 5 min threshold)",
+        # Trades held < 5 min: skip signal updates, but still learn meta-params
+        skip_signals = held_hours < 5.0 / 60.0
+        if skip_signals:
+            logger.info("[h-ts] Trade #%d: %s signal update skipped (held %.1f min < 5 min), meta-params still learning",
                         len(self._trades), ticker, held_hours * 60)
-            if self._save_path:
-                self.save()
-            return {"trade_number": len(self._trades), "ticker": ticker, "pnl_pct": pnl_pct,
-                    "skipped": True, "reason": "held < 5 minutes"}
 
         if len(self._trades) > self._max_window:
             self._trades = self._trades[-self._max_window:]
 
-        # Determine target regimes to update
-        target_regimes = [_GLOBAL_REGIME]
-        if regime and regime != "unknown":
+        # Dual regime: signal/group use 12-regime (vol_trend), meta uses full regime
+        signal_regime = self.signal_regime_key(regime)
+        signal_targets = [_GLOBAL_REGIME]
+        meta_targets = [_GLOBAL_REGIME]
+
+        if signal_regime and signal_regime != "unknown":
+            self._ensure_regime(signal_regime)
+            signal_targets.append(signal_regime)
+            self._regime_trade_counts[signal_regime] = self._regime_trade_counts.get(signal_regime, 0) + 1
+
+        if regime and regime != "unknown" and regime != signal_regime:
             self._ensure_regime(regime)
-            target_regimes.append(regime)
+            meta_targets.append(regime)
             self._regime_trade_counts[regime] = self._regime_trade_counts.get(regime, 0) + 1
+
         self._regime_trade_counts[_GLOBAL_REGIME] = self._regime_trade_counts.get(_GLOBAL_REGIME, 0) + 1
 
         # Adaptive discount
@@ -89,87 +95,101 @@ class RecordingMixin:
         updates = {}
         active_groups: Dict[str, List[float]] = {}
 
-        # Level 2: update individual signal Betas
-        for sig_name, signal_value in agent_signals.items():
-            if abs(signal_value) < 0.05:
-                continue
+        # SASR rank-based reward (arXiv:2408.03029)
+        # Rank PnL against recent trades → spread 0.80 vs old 0.24
+        rank_rw = self._rank_reward(pnl_pct)
 
-            group = SIGNAL_TO_GROUP.get(sig_name)
-            if group is None:
-                continue
-
-            signal_bullish = signal_value > 0
-            if is_short:
-                aligned = (not signal_bullish and profitable) or (signal_bullish and not profitable)
-            else:
-                aligned = (signal_bullish and profitable) or (not signal_bullish and not profitable)
-            effective_pnl = abs(pnl_pct) if aligned else -abs(pnl_pct)
-
-            for r in target_regimes:
-                sig_beta = self._signal_betas[r][group].get(sig_name)
-                if sig_beta is None:
-                    sig_beta = AgentBeta(name=sig_name)
-                    self._signal_betas[r][group][sig_name] = sig_beta
-                sig_beta.update(pnl_pct=effective_pnl, discount=self._signal_discount)
-
-            if group not in active_groups:
-                active_groups[group] = [effective_pnl]
-            else:
-                active_groups[group].append(effective_pnl)
-
-            updates[sig_name] = {
-                "group": group,
-                "signal": round(signal_value, 3),
-                "aligned": aligned,
-                "new_mean": round(
-                    self._signal_betas[_GLOBAL_REGIME][group][sig_name].mean, 4
-                ),
-            }
-
-        # TA-based independent learning (arXiv:2402.10289)
-        _VIRTUAL_WEIGHT = 0.5
-        _VIRTUAL_MIN_STRENGTH = 0.15
-        virtual_count = 0
-        if ta_snapshot:
-            mentioned = set(agent_signals.keys())
-            for sig_name, ta_value in ta_snapshot.items():
-                if sig_name in mentioned:
+        if not skip_signals:
+            # Level 2: update individual signal Betas
+            for sig_name, signal_value in agent_signals.items():
+                if abs(signal_value) < 0.05:
                     continue
-                if abs(ta_value) < _VIRTUAL_MIN_STRENGTH:
-                    continue
+
                 group = SIGNAL_TO_GROUP.get(sig_name)
                 if group is None:
                     continue
-                sig_bullish = ta_value > 0
+
+                signal_bullish = signal_value > 0
                 if is_short:
-                    aligned = (not sig_bullish and profitable) or (sig_bullish and not profitable)
+                    aligned = (not signal_bullish and profitable) or (signal_bullish and not profitable)
                 else:
-                    aligned = (sig_bullish and profitable) or (not sig_bullish and not profitable)
-                virtual_pnl = (abs(pnl_pct) if aligned else -abs(pnl_pct)) * _VIRTUAL_WEIGHT
-                for r in target_regimes:
-                    sb = self._signal_betas[r][group].get(sig_name)
-                    if sb is None:
-                        sb = AgentBeta(name=sig_name)
-                        self._signal_betas[r][group][sig_name] = sb
-                    sb.update(pnl_pct=virtual_pnl, discount=0.999, count_trade=False)
-                virtual_count += 1
+                    aligned = (signal_bullish and profitable) or (not signal_bullish and not profitable)
+                effective_pnl = abs(pnl_pct) if aligned else -abs(pnl_pct)
 
-        # Level 1: update group Betas (adaptive discount)
-        for group_name, pnl_list in active_groups.items():
-            avg_pnl = sum(pnl_list) / len(pnl_list)
-            for r in target_regimes:
-                self._group_betas[r][group_name].update(
-                    pnl_pct=avg_pnl, discount=adaptive_disc
-                )
+                for r in signal_targets:
+                    sig_beta = self._signal_betas[r][group].get(sig_name)
+                    if sig_beta is None:
+                        sig_beta = AgentBeta(name=sig_name)
+                        self._signal_betas[r][group][sig_name] = sig_beta
+                    if rank_rw is not None:
+                        sig_reward = rank_rw if aligned else (1.0 - rank_rw)
+                        sig_beta.update(discount=self._signal_discount, reward=sig_reward)
+                    else:
+                        sig_beta.update(pnl_pct=effective_pnl, discount=self._signal_discount)
 
-        # Level 0: update meta-parameter Betas
+                # Group PnL still uses effective_pnl (rank applied at signal level)
+                if group not in active_groups:
+                    active_groups[group] = [effective_pnl]
+                else:
+                    active_groups[group].append(effective_pnl)
+
+                updates[sig_name] = {
+                    "group": group,
+                    "signal": round(signal_value, 3),
+                    "aligned": aligned,
+                    "new_mean": round(
+                        self._signal_betas[_GLOBAL_REGIME][group][sig_name].mean, 4
+                    ),
+                }
+
+            # TA-based independent learning (arXiv:2402.10289)
+            _VIRTUAL_WEIGHT = 0.5
+            _VIRTUAL_MIN_STRENGTH = 0.15
+            virtual_count = 0
+            if ta_snapshot:
+                mentioned = set(agent_signals.keys())
+                for sig_name, ta_value in ta_snapshot.items():
+                    if sig_name in mentioned:
+                        continue
+                    if abs(ta_value) < _VIRTUAL_MIN_STRENGTH:
+                        continue
+                    group = SIGNAL_TO_GROUP.get(sig_name)
+                    if group is None:
+                        continue
+                    sig_bullish = ta_value > 0
+                    if is_short:
+                        aligned = (not sig_bullish and profitable) or (sig_bullish and not profitable)
+                    else:
+                        aligned = (sig_bullish and profitable) or (not sig_bullish and not profitable)
+                    virtual_pnl = (abs(pnl_pct) if aligned else -abs(pnl_pct)) * _VIRTUAL_WEIGHT
+                    for r in signal_targets:
+                        sb = self._signal_betas[r][group].get(sig_name)
+                        if sb is None:
+                            sb = AgentBeta(name=sig_name)
+                            self._signal_betas[r][group][sig_name] = sb
+                        sb.update(pnl_pct=virtual_pnl, discount=0.999, count_trade=False)
+                    virtual_count += 1
+
+            # Level 1: update group Betas (adaptive discount + SASR)
+            for group_name, pnl_list in active_groups.items():
+                avg_pnl = sum(pnl_list) / len(pnl_list)
+                for r in signal_targets:
+                    if rank_rw is not None:
+                        grp_reward = rank_rw if avg_pnl > 0 else (1.0 - rank_rw)
+                        self._group_betas[r][group_name].update(
+                            discount=adaptive_disc, reward=grp_reward)
+                    else:
+                        self._group_betas[r][group_name].update(
+                            pnl_pct=avg_pnl, discount=adaptive_disc)
+
+        # Level 0: update meta-parameter Betas (full regime, always)
         meta_updates = self._update_meta_params(
             pnl_pct=pnl_pct,
             held_hours=held_hours,
             position_pct_used=position_pct_used,
             confidence_at_entry=confidence_at_entry,
             agent_signals=agent_signals,
-            target_regimes=target_regimes,
+            target_regimes=meta_targets,
             discount=adaptive_disc,
             mfe=mfe,
             mae=mae,
@@ -177,13 +197,14 @@ class RecordingMixin:
         )
 
         logger.info(
-            "[h-ts] Trade #%d: %s pnl=%+.2f%% regime=%s discount=%.3f(streak=%d) groups=%s signals=%s virtual=%d meta=%s",
-            self.total_trades, ticker, pnl_pct * 100, regime,
+            "[h-ts] Trade #%d: %s pnl=%+.2f%% sig_regime=%s meta_regime=%s discount=%.3f(streak=%d) groups=%s signals=%s virtual=%d meta=%s%s",
+            self.total_trades, ticker, pnl_pct * 100, signal_regime, regime,
             adaptive_disc, self._regime_streak,
             list(active_groups.keys()),
             {k: v["aligned"] for k, v in updates.items()},
-            virtual_count,
+            virtual_count if not skip_signals else 0,
             {k: f"{v:+.3f}" for k, v in meta_updates.items()} if meta_updates else "N/A",
+            " (meta-only)" if skip_signals else "",
         )
 
         if self._save_path and not getattr(self, '_reprocessing', False):
@@ -219,10 +240,11 @@ class RecordingMixin:
 
         effective_pnl = raw_pnl * discount_factor
 
-        target_regimes = [_GLOBAL_REGIME]
-        if regime and regime != "unknown":
-            self._ensure_regime(regime)
-            target_regimes.append(regime)
+        signal_regime = self.signal_regime_key(regime)
+        signal_targets = [_GLOBAL_REGIME]
+        if signal_regime and signal_regime != "unknown":
+            self._ensure_regime(signal_regime)
+            signal_targets.append(signal_regime)
 
         adaptive_disc = self._get_adaptive_discount(regime)
 
@@ -241,12 +263,12 @@ class RecordingMixin:
             aligned = (signal_bullish and price_went_up) or (not signal_bullish and not price_went_up)
             sig_effective = abs(effective_pnl) if aligned else -abs(effective_pnl)
 
-            for r in target_regimes:
+            for r in signal_targets:
                 sb = self._signal_betas[r][group].get(sig_name)
                 if sb is None:
                     sb = AgentBeta(name=sig_name)
                     self._signal_betas[r][group][sig_name] = sb
-                sb.update(pnl_pct=sig_effective, discount=self._signal_discount,
+                sb.update(pnl_pct=sig_effective, discount=1.0,
                           count_trade=False)
 
             if group not in active_groups:
@@ -261,9 +283,9 @@ class RecordingMixin:
 
         for group_name, pnl_list in active_groups.items():
             avg_pnl = sum(pnl_list) / len(pnl_list)
-            for r in target_regimes:
+            for r in signal_targets:
                 self._group_betas[r][group_name].update(
-                    pnl_pct=avg_pnl, discount=adaptive_disc
+                    pnl_pct=avg_pnl, discount=1.0, count_trade=False
                 )
 
         if updates:
@@ -272,7 +294,7 @@ class RecordingMixin:
                 ticker, raw_pnl * 100, effective_pnl * 100, regime,
                 {k: v["aligned"] for k, v in updates.items()},
             )
-            if self._save_path:
+            if self._save_path and not getattr(self, '_reprocessing', False):
                 self.save()
 
         return {
@@ -303,10 +325,17 @@ class RecordingMixin:
         avoided_loss = abs(raw_pnl)
         effective_reward = avoided_loss * discount_factor
 
-        target_regimes = [_GLOBAL_REGIME]
-        if regime and regime != "unknown":
+        signal_regime = self.signal_regime_key(regime)
+        signal_targets = [_GLOBAL_REGIME]
+        meta_targets = [_GLOBAL_REGIME]
+
+        if signal_regime and signal_regime != "unknown":
+            self._ensure_regime(signal_regime)
+            signal_targets.append(signal_regime)
+
+        if regime and regime != "unknown" and regime != signal_regime:
             self._ensure_regime(regime)
-            target_regimes.append(regime)
+            meta_targets.append(regime)
 
         adaptive_disc = self._get_adaptive_discount(regime)
         updates = {}
@@ -324,12 +353,12 @@ class RecordingMixin:
             aligned = signal_bearish and price_dropped
             sig_effective = effective_reward if aligned else -effective_reward
 
-            for r in target_regimes:
+            for r in signal_targets:
                 sb = self._signal_betas[r][group].get(sig_name)
                 if sb is None:
                     sb = AgentBeta(name=sig_name)
                     self._signal_betas[r][group][sig_name] = sb
-                sb.update(pnl_pct=sig_effective, discount=self._signal_discount,
+                sb.update(pnl_pct=sig_effective, discount=1.0,
                           count_trade=False)
 
             if group not in active_groups:
@@ -341,17 +370,17 @@ class RecordingMixin:
             }
 
         for group_name, group_pnl in active_groups.items():
-            for r in target_regimes:
+            for r in signal_targets:
                 self._group_betas[r][group_name].update(
-                    pnl_pct=group_pnl, discount=adaptive_disc
+                    pnl_pct=group_pnl, discount=1.0, count_trade=False
                 )
 
         # Meta-param: reward risk_aversion (correctly cautious)
         meta_reward = min(0.03, effective_reward)
-        for r in target_regimes:
+        for r in meta_targets:
             ra = self._meta_betas.get(r, {}).get("risk_aversion")
             if ra:
-                ra.update(pnl_pct=meta_reward, discount=adaptive_disc,
+                ra.update(pnl_pct=meta_reward, discount=1.0,
                           count_trade=False)
 
         if updates:
@@ -360,7 +389,7 @@ class RecordingMixin:
                 ticker, raw_pnl * 100, effective_reward * 100, regime,
                 {k: v["aligned"] for k, v in updates.items()},
             )
-            if self._save_path:
+            if self._save_path and not getattr(self, '_reprocessing', False):
                 self.save()
 
         return {
@@ -399,10 +428,17 @@ class RecordingMixin:
 
         effective_pnl = abs(additional_pnl) * discount_factor
 
-        target_regimes = [_GLOBAL_REGIME]
-        if regime and regime != "unknown":
+        signal_regime = self.signal_regime_key(regime)
+        signal_targets = [_GLOBAL_REGIME]
+        meta_targets = [_GLOBAL_REGIME]
+
+        if signal_regime and signal_regime != "unknown":
+            self._ensure_regime(signal_regime)
+            signal_targets.append(signal_regime)
+
+        if regime and regime != "unknown" and regime != signal_regime:
             self._ensure_regime(regime)
-            target_regimes.append(regime)
+            meta_targets.append(regime)
 
         adaptive_disc = self._get_adaptive_discount(regime)
         updates = {}
@@ -426,12 +462,12 @@ class RecordingMixin:
                 signal_warned_exit = (is_long and not signal_bullish) or (not is_long and signal_bullish)
                 sig_effective = effective_pnl if signal_warned_exit else -effective_pnl
 
-            for r in target_regimes:
+            for r in signal_targets:
                 sb = self._signal_betas[r][group].get(sig_name)
                 if sb is None:
                     sb = AgentBeta(name=sig_name)
                     self._signal_betas[r][group][sig_name] = sb
-                sb.update(pnl_pct=sig_effective, discount=self._signal_discount,
+                sb.update(pnl_pct=sig_effective, discount=1.0,
                           count_trade=False)
 
             if group not in active_groups:
@@ -448,29 +484,29 @@ class RecordingMixin:
         # Level 1: Group updates
         for group_name, pnl_list in active_groups.items():
             avg_pnl = sum(pnl_list) / len(pnl_list)
-            for r in target_regimes:
+            for r in signal_targets:
                 self._group_betas[r][group_name].update(
-                    pnl_pct=avg_pnl, discount=adaptive_disc
+                    pnl_pct=avg_pnl, discount=1.0, count_trade=False
                 )
 
         # Level 0: Meta-parameter updates
         meta_reward = min(0.03, effective_pnl)
-        for r in target_regimes:
+        for r in meta_targets:
             if was_premature:
                 patience_scale = min(2.0, max(0.5, 1.0 / max(held_hours, 0.1)))
                 patience_eff = min(0.03, meta_reward * patience_scale)
                 hp = self._meta_betas.get(r, {}).get("hold_patience")
                 if hp:
-                    hp.update(pnl_pct=patience_eff, discount=adaptive_disc,
+                    hp.update(pnl_pct=patience_eff, discount=1.0,
                               count_trade=False)
                 ra = self._meta_betas.get(r, {}).get("risk_aversion")
                 if ra:
-                    ra.update(pnl_pct=-meta_reward, discount=adaptive_disc,
+                    ra.update(pnl_pct=-meta_reward, discount=1.0,
                               count_trade=False)
             else:
                 ra = self._meta_betas.get(r, {}).get("risk_aversion")
                 if ra:
-                    ra.update(pnl_pct=meta_reward, discount=adaptive_disc,
+                    ra.update(pnl_pct=meta_reward, discount=1.0,
                               count_trade=False)
 
         label = "PREMATURE" if was_premature else "VALIDATED"
@@ -478,7 +514,7 @@ class RecordingMixin:
             "[h-ts] Exit regret %s %s: additional=%+.2f%% effective=%+.2f%% regime=%s signals=%d",
             label, ticker, additional_pnl * 100, effective_pnl * 100, regime, len(updates),
         )
-        if self._save_path:
+        if self._save_path and not getattr(self, '_reprocessing', False):
             self.save()
 
         return {

@@ -19,6 +19,7 @@ References:
 from __future__ import annotations
 
 import time as _time_module
+from collections import deque
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -65,8 +66,8 @@ class HierarchicalOnlineLearner(
         save_path: Optional[str] = None,
         min_trades_to_adapt: int = 5,
         max_window: int = 100,
-        group_discount: float = 0.99,
-        signal_discount: float = 0.985,
+        group_discount: float = 0.985,
+        signal_discount: float = 0.998,
     ) -> None:
         self._save_path = Path(save_path) if save_path else None
         self._min_trades = min_trades_to_adapt
@@ -96,6 +97,9 @@ class HierarchicalOnlineLearner(
         self._total_pnl: float = 0.0
         self._regime_trade_counts: Dict[str, int] = {_GLOBAL_REGIME: 0}
 
+        # SASR rank-based reward (arXiv:2408.03029)
+        self._recent_pnls: deque = deque(maxlen=50)
+
         # Adaptive discount state (ADTS — arXiv:2410.04217)
         self._last_regime: Optional[str] = None
         self._regime_streak: int = 0
@@ -114,3 +118,34 @@ class HierarchicalOnlineLearner(
     @property
     def has_enough_data(self) -> bool:
         return self.total_trades >= self._min_trades
+
+    @staticmethod
+    def signal_regime_key(combined_regime: str) -> str:
+        """vol_trend_macro → vol_trend (12 regimes for signal/group learning).
+
+        RSI/MACD 같은 기술 시그널은 macro와 무관 → macro 축 제거.
+        12 regimes = 충분한 데이터 집중 (2,600 trades/regime vs 700).
+        """
+        if not combined_regime or combined_regime in ("unknown", "_global"):
+            return combined_regime
+        for trend_kw in ("_uptrend", "_downtrend", "_ranging"):
+            idx = combined_regime.find(trend_kw)
+            if idx >= 0:
+                return combined_regime[:idx + len(trend_kw)]
+        return combined_regime
+
+    def _rank_reward(self, pnl_pct: float) -> Optional[float]:
+        """SASR rank-based reward (arXiv:2408.03029).
+
+        Maps trade PnL to percentile rank against recent trades.
+        Returns reward in [0.10, 0.90] with full spread,
+        or None if insufficient history (falls back to PnL-based).
+
+        Why: PnL ±0.3% → old reward 0.38-0.62 (spread 0.24, no learning)
+             rank-based → worst=0.10, best=0.90 (spread 0.80, clear signal)
+        """
+        self._recent_pnls.append(pnl_pct)
+        if len(self._recent_pnls) < 10:
+            return None
+        rank = sum(1 for p in self._recent_pnls if p <= pnl_pct) / len(self._recent_pnls)
+        return 0.10 + rank * 0.80

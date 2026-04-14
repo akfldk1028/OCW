@@ -122,7 +122,7 @@ CRYPTO_RISK_CONFIG = {
     "kelly_fraction": 0.15,        # conservative Kelly for crypto
     "trailing_stop_atr_multiplier": 2.5,  # wide trail — only catches big runners
     "max_hold_hours": 24.0,        # 24h max — hourly-scale trades need more room
-    "min_confidence": 0.60,        # reject low-conviction trades (adaptive override in runner)
+    "min_confidence": 0.50,        # reject low-conviction trades (safety layer)
     # Scalp trailing — widened for 1h-primary regime
     "scalp_trail_activation_pct": 0.03,   # +3% peak → activate
     "scalp_trail_width_pct": 0.015,       # 1.5% width
@@ -134,6 +134,11 @@ CRYPTO_RISK_CONFIG = {
     "dca_max_hold_hours": 24.0,           # 24h max
     "dca_trail_activation_pct": 0.03,     # +3% peak
     "dca_trail_width_pct": 0.015,         # 1.5% width
+    # Daily risk management — execution-layer edge leak prevention
+    "max_daily_loss_pct": 0.03,           # -3% daily loss → stop new entries for the day
+    "max_daily_trades": 10,               # max 10 trades per day (force selectivity)
+    "max_hourly_trades": 5,               # max 5 trades per hour (cascade prevention)
+    "drawdown_reduce_threshold": 0.05,    # -5% drawdown from session peak → position size 50%
 }
 
 # Regime Blend config — validated via backtest_v2.py (daily bars)

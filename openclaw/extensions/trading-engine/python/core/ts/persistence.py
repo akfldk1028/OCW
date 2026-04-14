@@ -184,15 +184,11 @@ class PersistenceMixin:
                     len(self._trades),
                 )
                 self.reprocess_all_trades()
-            else:
-                short_trades = sum(1 for t in self._trades if t.held_hours < 5.0 / 60.0 and abs(t.pnl_pct) > 1e-8)
-                if short_trades > 0:
-                    logger.warning(
-                        "[h-ts] Found %d trades held < 5 min (position-restore artifacts). "
-                        "Reprocessing to exclude them from posteriors.",
-                        short_trades,
-                    )
-                    self.reprocess_all_trades()
+            # Note: short trades (held < 5m) are no longer reprocessed out —
+            # record_trade now handles them correctly (meta-only learning).
+
+            # Migrate old 43-regime group/signal betas into 12 signal regimes
+            self._migrate_to_signal_regimes()
 
             return True
 
@@ -289,8 +285,9 @@ class PersistenceMixin:
         self._reprocessing = True
         try:
             for t in old_trades:
-                if abs(t.pnl_pct) < 1e-8 or t.held_hours < 5.0 / 60.0:
+                if abs(t.pnl_pct) < 1e-8:
                     continue
+                # held<5m trades: record_trade handles them (meta-only learning)
                 self.record_trade(
                     ticker=t.ticker,
                     entry_price=t.entry_price,
@@ -308,3 +305,83 @@ class PersistenceMixin:
         if self._save_path:
             self.save()
         logger.info("[h-ts] Reprocessed %d trades -> %d valid.", n, len(self._trades))
+
+    def _migrate_to_signal_regimes(self) -> None:
+        """Merge old 43-regime group/signal betas into 12 signal regimes.
+
+        Maps vol_trend_macro → vol_trend for group/signal betas.
+        Meta betas keep full regime keys.
+        """
+        from .hierarchical import HierarchicalOnlineLearner
+
+        # Collect old regime keys that have macro suffix (not already signal regimes)
+        old_keys = set()
+        for regime_key in list(self._group_betas.keys()):
+            if regime_key == _GLOBAL_REGIME:
+                continue
+            sig_key = HierarchicalOnlineLearner.signal_regime_key(regime_key)
+            if sig_key != regime_key:
+                old_keys.add(regime_key)
+
+        if not old_keys:
+            return
+
+        logger.info("[h-ts] Migrating %d old regime keys to signal regimes...", len(old_keys))
+
+        # Group betas: merge old → signal_regime via weighted average
+        for old_key in old_keys:
+            sig_key = HierarchicalOnlineLearner.signal_regime_key(old_key)
+            old_trades = self._regime_trade_counts.get(old_key, 0)
+            if old_trades == 0:
+                # No data, just remove
+                self._group_betas.pop(old_key, None)
+                self._signal_betas.pop(old_key, None)
+                continue
+
+            # Ensure target signal regime exists
+            if sig_key not in self._group_betas:
+                self._ensure_regime(sig_key)
+
+            existing_trades = self._regime_trade_counts.get(sig_key, 0)
+            total_w = old_trades + existing_trades
+            w_old = old_trades / total_w if total_w > 0 else 0.5
+            w_existing = existing_trades / total_w if total_w > 0 else 0.5
+
+            # Merge group betas
+            old_groups = self._group_betas.get(old_key, {})
+            for g_name, old_beta in old_groups.items():
+                if g_name not in self._group_betas[sig_key]:
+                    continue
+                tgt = self._group_betas[sig_key][g_name]
+                tgt.alpha = w_existing * tgt.alpha + w_old * old_beta.alpha
+                tgt.beta = w_existing * tgt.beta + w_old * old_beta.beta
+                tgt.total_trades = max(tgt.total_trades, old_beta.total_trades)
+
+            # Merge signal betas
+            old_sigs = self._signal_betas.get(old_key, {})
+            for g_name, sigs in old_sigs.items():
+                if g_name not in self._signal_betas.get(sig_key, {}):
+                    continue
+                for s_name, old_sb in sigs.items():
+                    if s_name not in self._signal_betas[sig_key][g_name]:
+                        self._signal_betas[sig_key][g_name][s_name] = AgentBeta(name=s_name)
+                    tgt = self._signal_betas[sig_key][g_name][s_name]
+                    tgt.alpha = w_existing * tgt.alpha + w_old * old_sb.alpha
+                    tgt.beta = w_existing * tgt.beta + w_old * old_sb.beta
+                    tgt.total_trades = max(tgt.total_trades, old_sb.total_trades)
+
+            # Update trade counts for signal regime
+            self._regime_trade_counts[sig_key] = self._regime_trade_counts.get(sig_key, 0) + old_trades
+
+            # Remove old keys from group/signal (keep in meta)
+            self._group_betas.pop(old_key, None)
+            self._signal_betas.pop(old_key, None)
+
+        logger.info(
+            "[h-ts] Migration complete: %d signal regimes, %d meta regimes",
+            len([k for k in self._group_betas if k != _GLOBAL_REGIME]),
+            len([k for k in self._meta_betas if k != _GLOBAL_REGIME]),
+        )
+
+        if self._save_path:
+            self.save()

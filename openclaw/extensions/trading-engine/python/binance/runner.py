@@ -97,6 +97,15 @@ class CryptoRunner:
         # Post-exit counterfactual: track price after exits for hold_patience learning
         self.exit_regret_tracker = ExitRegretTracker()
 
+        # Daily risk management state
+        self._daily_pnl_pct: float = 0.0
+        self._daily_trade_count: int = 0
+        self._hourly_trade_count: int = 0
+        self._daily_reset_date: str = ""
+        self._hourly_reset_hour: int = -1
+        self._session_peak_balance: float = 0.0
+        self._consecutive_losses: int = 0
+
         # OHLCV store — WS-fed, bootstrap once from REST, then zero REST calls
         self.ohlcv_store = OHLCVStore(maxlen=1500)
 
@@ -177,8 +186,10 @@ class CryptoRunner:
         # Liquidation tracker: real-time WS forceOrder → cluster estimation → H-TS signal
         self.liquidation_tracker = LiquidationTracker(tickers=cfg["tickers"])
 
-        # OOD detector: Mahalanobis distance for anomalous market state detection
-        self.ood_detector = OODDetector(window=200, min_samples=30)
+        # OOD detector: per-ticker Mahalanobis distance for anomalous market state detection
+        self.ood_detectors: Dict[str, OODDetector] = {
+            t: OODDetector(window=200, min_samples=30) for t in cfg["tickers"]
+        }
 
         # Position tracker
         self.position_tracker = PositionTracker(
@@ -198,6 +209,53 @@ class CryptoRunner:
     # ------------------------------------------------------------------
     # Setup
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Daily Risk Management
+    # ------------------------------------------------------------------
+
+    def _reset_daily_stats(self) -> None:
+        """Reset daily/hourly counters on date/hour change (UTC)."""
+        now = datetime.now(timezone.utc)
+        today = now.strftime("%Y-%m-%d")
+        current_hour = now.hour
+
+        if self._daily_reset_date != today:
+            logger.info("[risk] Daily reset: pnl=%.2f%%, trades=%d → zeroed",
+                        self._daily_pnl_pct * 100, self._daily_trade_count)
+            self._daily_pnl_pct = 0.0
+            self._daily_trade_count = 0
+            self._hourly_trade_count = 0
+            self._daily_reset_date = today
+            self._hourly_reset_hour = current_hour
+            self._consecutive_losses = 0
+
+        if self._hourly_reset_hour != current_hour:
+            self._hourly_trade_count = 0
+            self._hourly_reset_hour = current_hour
+
+    def _check_risk_limits(self) -> str | None:
+        """Pre-trade risk check. Returns block reason or None if allowed."""
+        from config import CRYPTO_RISK_CONFIG
+        max_daily_loss = CRYPTO_RISK_CONFIG.get("max_daily_loss_pct", 0.03)
+        max_daily_trades = CRYPTO_RISK_CONFIG.get("max_daily_trades", 20)
+        max_hourly_trades = CRYPTO_RISK_CONFIG.get("max_hourly_trades", 5)
+
+        self._reset_daily_stats()
+
+        # 1. Daily loss limit
+        if self._daily_pnl_pct <= -max_daily_loss:
+            return f"daily loss limit ({self._daily_pnl_pct*100:+.1f}%)"
+
+        # 2. Daily trade count
+        if self._daily_trade_count >= max_daily_trades:
+            return f"daily trade limit ({self._daily_trade_count})"
+
+        # 3. Hourly trade count
+        if self._hourly_trade_count >= max_hourly_trades:
+            return f"hourly trade limit ({self._hourly_trade_count})"
+
+        return None  # trading allowed
 
     def _save_state(self) -> None:
         """Persist entry_prices, entry_times, and agent_memory to disk for restart recovery."""
@@ -230,6 +288,13 @@ class CryptoRunner:
             "realized_pnl_usd": self._realized_pnl_usd,
             "entry_meta": self._entry_meta,
             "initial_balance": self._initial_balance,
+            "daily_risk": {
+                "daily_pnl_pct": self._daily_pnl_pct,
+                "daily_trade_count": self._daily_trade_count,
+                "daily_reset_date": self._daily_reset_date,
+                "session_peak_balance": self._session_peak_balance,
+                "consecutive_losses": self._consecutive_losses,
+            },
         }
         try:
             self._state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -254,6 +319,19 @@ class CryptoRunner:
             self._agent_memory = state.get("agent_memory", "")
             self._realized_pnl_usd = state.get("realized_pnl_usd", 0.0)
             self._entry_meta = state.get("entry_meta", {})
+            # Restore daily risk state
+            dr = state.get("daily_risk", {})
+            if dr:
+                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                if dr.get("daily_reset_date") == today:
+                    self._daily_pnl_pct = dr.get("daily_pnl_pct", 0.0)
+                    self._daily_trade_count = dr.get("daily_trade_count", 0)
+                    self._daily_reset_date = dr.get("daily_reset_date", "")
+                    self._consecutive_losses = dr.get("consecutive_losses", 0)
+                    logger.info("[risk] Restored daily stats: pnl=%.2f%%, trades=%d, losses=%d",
+                                self._daily_pnl_pct * 100, self._daily_trade_count, self._consecutive_losses)
+                self._session_peak_balance = dr.get("session_peak_balance", 0.0)
+
             # Restore initial_balance if broker returned 0 (demo session expired)
             saved_balance = state.get("initial_balance", 0.0)
             if self._initial_balance <= 0 and saved_balance > 0:
@@ -1120,6 +1198,28 @@ class CryptoRunner:
                     position_usd = qty * entry_px
                     self._realized_pnl_usd += pnl_pct * position_usd
 
+                # Daily risk tracking (portfolio-weighted PnL)
+                portfolio = self._estimate_portfolio_value()
+                if portfolio > 0 and entry_px > 0 and qty > 0:
+                    position_weight = (qty * entry_px) / portfolio
+                    self._daily_pnl_pct += pnl_pct * position_weight
+                else:
+                    self._daily_pnl_pct += pnl_pct  # fallback: raw pnl
+                self._daily_trade_count += 1
+                self._hourly_trade_count += 1
+                if pnl_pct < 0:
+                    self._consecutive_losses += 1
+                else:
+                    self._consecutive_losses = 0
+
+                # Loss streak → size reduction (anti-martingale, no hard block)
+                if self._consecutive_losses >= 2:
+                    logger.info("[risk] %d consecutive losses → size reduction active", self._consecutive_losses)
+
+                # Session peak balance update
+                portfolio = self._estimate_portfolio_value()
+                self._session_peak_balance = max(self._session_peak_balance, portfolio)
+
                 # Clean up _entry_prices for ANY exit (safety or claude)
                 self._entry_prices.pop(ticker, None)
                 # Anti-churn cooldown for safety exits too
@@ -1183,24 +1283,24 @@ class CryptoRunner:
                 merged_signals = dict(ta_snap)
                 merged_signals.update(agent_signals)
 
-                if merged_signals:
-                    self.online_learner.record_trade(
-                        ticker=ticker,
-                        entry_price=data.get("entry_price", 0),
-                        exit_price=exit_price,
-                        pnl_pct=pnl_pct,
-                        held_hours=held_hours,
-                        agent_signals=merged_signals,
-                        market_type="crypto",
-                        regime=combined_regime,
-                        position_pct_used=meta.get("position_pct", 0.0),
-                        confidence_at_entry=meta.get("confidence", 0.0),
-                        position_side=pos_side,
-                        ta_snapshot=None,  # already merged, no virtual needed
-                        mfe=mfe,
-                        mae=mae,
-                        capture_ratio=capture_ratio,
-                    )
+                # 무조건 학습 (시그널 없어도 meta-param(hold_patience 등)은 학습 가능)
+                self.online_learner.record_trade(
+                    ticker=ticker,
+                    entry_price=data.get("entry_price", 0),
+                    exit_price=exit_price,
+                    pnl_pct=pnl_pct,
+                    held_hours=held_hours,
+                    agent_signals=merged_signals,
+                    market_type="crypto",
+                    regime=combined_regime,
+                    position_pct_used=meta.get("position_pct", 0.0),
+                    confidence_at_entry=meta.get("confidence", 0.0),
+                    position_side=pos_side,
+                    ta_snapshot=None,  # already merged, no virtual needed
+                    mfe=mfe,
+                    mae=mae,
+                    capture_ratio=capture_ratio,
+                )
                 # Record to Neo4j for cross-session memory
                 try:
                     self.memory.record_trade({
@@ -2005,6 +2105,7 @@ class CryptoRunner:
 
         # OOD detection: score each candidate's TA features
         ood_scores: Dict[str, float] = {}
+        ood_decomposed: Dict[str, Dict[str, float]] = {}
         for tic in candidates:
             ta_signals = self._extract_ta_signals(tic, MarketSnapshot(
                 ticker_prices=ticker_prices,
@@ -2020,12 +2121,31 @@ class CryptoRunner:
                 candidates=candidates,
             ))
             if ta_signals:
-                self.ood_detector.update(ta_signals)
-                is_ood, dist = self.ood_detector.is_ood(ta_signals)
+                ood = self.ood_detectors.get(tic)
+                if ood is None:
+                    ood = OODDetector(window=200, min_samples=30)
+                    self.ood_detectors[tic] = ood
+                ood.update(ta_signals)
+                is_ood, dist = ood.is_ood(ta_signals)
                 if dist > 0:
                     ood_scores[tic] = round(dist, 2)
-                if is_ood:
-                    logger.info("[ood] %s: Mahalanobis=%.2f (OOD)", tic, dist)
+                # Decomposed turbulence scoring
+                decomp = ood.score_decomposed(ta_signals)
+                if decomp is not None:
+                    total, magnitude, correlation = decomp
+                    ood_decomposed[tic] = {
+                        "total": round(total, 2),
+                        "magnitude": round(magnitude, 2),
+                        "correlation": round(correlation, 3),
+                    }
+                    if correlation > 1.5 and total > 6.0:
+                        logger.warning("[ood] %s: STRUCTURAL BREAK total=%.2f mag=%.2f corr=%.2f",
+                                       tic, total, magnitude, correlation)
+                    elif total > 6.0:
+                        logger.info("[ood] %s: magnitude spike (correlations intact) total=%.2f mag=%.2f corr=%.2f",
+                                    tic, total, magnitude, correlation)
+                elif is_ood:
+                    logger.info("[ood] %s: Mahalanobis=%.2f (OOD, decomposition not ready)", tic, dist)
 
         # Safety config for dynamic prompt generation (no hardcoded values in prompt)
         from config import CRYPTO_RISK_CONFIG
@@ -2108,6 +2228,7 @@ class CryptoRunner:
             diary_context=diary_context,
             liquidation_contexts=liq_contexts,
             ood_scores=ood_scores,
+            ood_decomposed=ood_decomposed,
         )
 
     # ------------------------------------------------------------------
@@ -2177,6 +2298,19 @@ class CryptoRunner:
             snapshot = await self._build_snapshot(close_df, positions, pv, trigger)
             snapshot.gate_wake_reasons = wake_reasons or []
             snapshot.agent_memory = self._agent_memory
+
+            # Daily risk context for Claude prompt
+            self._reset_daily_stats()
+            from config import CRYPTO_RISK_CONFIG as _risk_cfg
+            snapshot.daily_pnl_pct = self._daily_pnl_pct
+            snapshot.daily_trade_count = self._daily_trade_count
+            snapshot.max_daily_trades = _risk_cfg.get("max_daily_trades", 20)
+            snapshot.consecutive_losses = self._consecutive_losses
+            if self._session_peak_balance > 0 and pv > 0:
+                snapshot.drawdown_pct = max(0.0, 1.0 - (pv / self._session_peak_balance))
+            # Initialize session peak if not set
+            if self._session_peak_balance <= 0 and pv > 0:
+                self._session_peak_balance = pv
 
             # === Claude Agent decides ===
             agent_result = await self.claude_agent.decide(snapshot)
@@ -2418,11 +2552,6 @@ class CryptoRunner:
                         self._write_alert("SELL", f"{ticker} @ ${d['price']:,.2f} PnL={pnl_pct:+.2%}")
 
                     elif d["action"] == "SHORT" and d.get("price", 0) > 0:
-                        # SHORT confidence gate: require >= 0.75 confidence (31.9% WR at lower thresholds)
-                        short_conf = d.get("confidence", 0)
-                        if short_conf < 0.75:
-                            logger.info("[decide] SHORT %s blocked: confidence %.2f < 0.75 threshold", ticker, short_conf)
-                            continue
                         if ticker not in executed_tickers:
                             logger.warning("[decide] SHORT %s failed execution, skipping track", ticker)
                             continue
@@ -2581,6 +2710,13 @@ class CryptoRunner:
             if ticker not in snapshot.candidates and action in ("BUY", "SHORT"):
                 continue
 
+            # Risk guard: block NEW entries when daily limits hit (exits always allowed)
+            if action in ("BUY", "SHORT"):
+                risk_block = self._check_risk_limits()
+                if risk_block:
+                    logger.warning("[risk] New entry blocked (%s %s): %s", action, ticker, risk_block)
+                    continue
+
             price = snapshot.ticker_prices.get(ticker, 0)
             if price <= 0:
                 continue
@@ -2593,6 +2729,23 @@ class CryptoRunner:
                 position_pct = max(0.0, min(position_pct, max_pos))
             except (TypeError, ValueError):
                 position_pct = 0.10
+
+            # Drawdown-based position size reduction
+            if action in ("BUY", "SHORT") and self._session_peak_balance > 0:
+                portfolio = snapshot.portfolio_value if snapshot.portfolio_value > 0 else self._estimate_portfolio_value()
+                drawdown = 1.0 - (portfolio / self._session_peak_balance)
+                dd_threshold = CRYPTO_RISK_CONFIG.get("drawdown_reduce_threshold", 0.05)
+                if drawdown >= dd_threshold:
+                    position_pct *= 0.5
+                    logger.info("[risk] Drawdown %.1f%% → position halved to %.1f%%",
+                                drawdown * 100, position_pct * 100)
+
+            # Loss streak anti-martingale sizing
+            if action in ("BUY", "SHORT") and self._consecutive_losses >= 2:
+                streak_factor = 0.25 if self._consecutive_losses >= 3 else 0.50
+                position_pct *= streak_factor
+                logger.info("[risk] %d consecutive losses → size ×%.0f%%",
+                            self._consecutive_losses, streak_factor * 100)
 
             # Enforce max portfolio exposure (CRYPTO_RISK_CONFIG["max_exposure_pct"])
             if action in ("BUY", "SHORT"):
@@ -2618,13 +2771,20 @@ class CryptoRunner:
                 logger.info("[decide] position_size_usd=$%.2f < $100 minimum, bumping to $100", position_size_usd)
                 position_size_usd = 100.0
 
-            # Agent decides confidence — no hardcoded filter.
-            # Claude's confidence is logged for H-TS learning, not gatekept.
+            # Confidence gate: min_confidence from config (safety layer, not strategy constraint)
             try:
                 confidence = float(d.get("confidence", 0.5))
                 confidence = max(0.0, min(1.0, confidence))
             except (TypeError, ValueError):
                 confidence = 0.5
+
+            # Block low-confidence NEW entries (exits always allowed)
+            if action in ("BUY", "SHORT"):
+                min_conf = CRYPTO_RISK_CONFIG.get("min_confidence", 0.65)
+                if confidence < min_conf:
+                    logger.info("[risk] Low confidence entry skipped (%s %s): %.0f%% < %.0f%%",
+                                action, ticker, confidence * 100, min_conf * 100)
+                    continue
 
             # Build agent_signals: prefer Claude's explicit signal_weights, fallback to keyword extraction
             reasoning = d.get("reasoning", "")

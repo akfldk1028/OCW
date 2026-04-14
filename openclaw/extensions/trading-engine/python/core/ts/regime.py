@@ -36,7 +36,7 @@ class RegimeMixin:
             return 0.92
 
         if self._regime_streak >= 5:
-            return 0.995
+            return min(0.99, self._group_discount + 0.005)
 
         return self._group_discount
 

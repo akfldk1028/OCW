@@ -20,8 +20,8 @@ class AgentBeta:
     are sampled normally via Thompson Sampling.
     """
     name: str
-    alpha: float = 2.0    # prior: 2 successes (mildly optimistic)
-    beta: float = 2.0     # prior: 2 failures
+    alpha: float = 1.0    # uniform prior Beta(1,1) — effective sample size 2 (was 4)
+    beta: float = 1.0     # faster learning: prior weight halved vs Beta(2,2)
     total_trades: int = 0
     _reward_history: List[float] = field(default_factory=list, repr=False)
 
@@ -51,13 +51,15 @@ class AgentBeta:
         Normalized: var / 0.12 (max variance of uniform [0,1] is 1/12 ≈ 0.083,
         but real rewards cluster near 0.05-0.95, so 0.12 gives good spread).
         """
-        if len(self._reward_history) < 3:
-            return 0.5  # insufficient data → neutral (pure TS)
         n = len(self._reward_history)
+        if n < 3:
+            return 0.7  # insufficient data → 70% TS, 30% prior (was 0.5)
         mean_r = sum(self._reward_history) / n
         var_r = sum((r - mean_r) ** 2 for r in self._reward_history) / n
-        # Invert: high variance → low stability
-        return max(0.0, min(1.0, 1.0 - var_r / 0.12))
+        base_stability = max(0.0, min(1.0, 1.0 - var_r / 0.12))
+        # Adaptive PS: data가 쌓이면 PS 자동 비활성화 (arXiv:2305.10718)
+        data_factor = min(1.0, self.total_trades / 30)  # 30 trades 후 순수 TS
+        return base_stability * (1.0 - data_factor) + data_factor
 
     def sample(self, use_ps: bool = False) -> float:
         """Sample from Beta(alpha, beta).
@@ -75,32 +77,30 @@ class AgentBeta:
         return s * ts_sample + (1.0 - s) * 0.5
 
     def update(self, pnl_pct: float = 0.0, discount: float = 0.995,
-               count_trade: bool = True) -> None:
+               count_trade: bool = True, reward: float = None) -> None:
         """Update posterior with discounted Thompson Sampling.
 
         - Decay existing beliefs (prevents stale priors dominating)
-        - PAR sigmoid reward: minimizes policy gradient variance (Theorem 3.2)
+        - reward param: pre-computed reward (e.g. SASR rank-based) bypasses PnL mapping
+        - Without reward: falls back to asymmetric piecewise-linear from PnL
         - count_trade=False for virtual/indirect updates (don't inflate trade count)
-        - Tracks reward history for Predictive Sampling stability estimation
 
         References:
+            arXiv:2408.03029 — SASR: rank-based reward via Beta distributions
             arXiv:2502.18770 — PAR: bounded sigmoid reward minimizes variance
             arXiv:2305.10718 — optimal discount for non-stationary bandits
-            arXiv:2205.01970 — Predictive Sampling for non-stationary bandits
         """
         # Discount existing beliefs (ADTS: proportional decay)
         self.alpha = max(1.0, self.alpha * discount)
         self.beta = max(1.0, self.beta * discount)
 
-        # Asymmetric piecewise-linear reward (loss slope 1.5x win slope)
-        # Win:  +1% → 0.90,  Loss: -1% → 0.05 (clamped)
-        # Effect: H-TS favors high R:R parameter combos
-        # Ref: arXiv:2507.19639 — Asymmetric Reward Shaping
-        pnl_scaled = pnl_pct * 100
-        if pnl_scaled >= 0:
-            reward = 0.50 + pnl_scaled * 0.40   # win: +1% → 0.90
-        else:
-            reward = 0.50 + pnl_scaled * 0.60   # loss: -1% → -0.10 → clamped 0.05
+        if reward is None:
+            # Fallback: asymmetric piecewise-linear reward from PnL
+            pnl_scaled = pnl_pct * 100
+            if pnl_scaled >= 0:
+                reward = 0.50 + pnl_scaled * 0.40
+            else:
+                reward = 0.50 + pnl_scaled * 0.60
         reward = max(0.05, min(0.95, reward))
         self.alpha += reward
         self.beta += (1.0 - reward)

@@ -213,6 +213,16 @@ class MarketSnapshot:
     # OOD scores per ticker (Mahalanobis distance, normal=2-4, OOD>6)
     ood_scores: Dict[str, float] = field(default_factory=dict)
 
+    # OOD decomposed scores per ticker {ticker: {total, magnitude, correlation}}
+    ood_decomposed: Dict[str, Dict[str, float]] = field(default_factory=dict)
+
+    # Daily risk context (session performance for Claude awareness)
+    daily_pnl_pct: float = 0.0
+    daily_trade_count: int = 0
+    max_daily_trades: int = 20
+    consecutive_losses: int = 0
+    drawdown_pct: float = 0.0
+
     def to_prompt(self) -> str:
         """Serialize into a Claude-readable prompt section."""
         lines = []
@@ -461,16 +471,24 @@ class MarketSnapshot:
                 "position_scale":       ("SIZE DOWN",     "SIZE UP"),
                 "entry_selectivity":    ("BROAD ENTRY",   "BE PICKY"),
                 "hold_patience":        ("TIGHT TARGETS", "HOLD LONGER"),
-                "trade_frequency":      ("REDUCE LONGS",  "BE ACTIVE"),
+                "trade_frequency":      ("BE SELECTIVE",  "BE ACTIVE"),
                 "trend_vs_reversion":   ("MEAN-REVERT",   "TREND-FOLLOW"),
                 "risk_aversion":        ("AGGRESSIVE",    "RISK-OFF"),
                 "profit_target_width":  ("TIGHT TP",      "WIDE TP"),
-                "loss_tolerance":       ("CUT FAST",      "GIVE ROOM"),
+                "loss_tolerance":       ("TIGHTER STOPS",  "GIVE ROOM"),
+            }
+            # Display floors — prevent Claude from misinterpreting low raw values
+            # as "exit immediately". Raises avg win from +0.17% toward +0.30%+
+            _display_floors = {
+                "loss_tolerance": 0.25,       # allow tighter stops, but not hair-trigger
+                "hold_patience": 0.45,
+                "profit_target_width": 0.45,
             }
             for param, value in self.ts_meta_params.items():
+                display_val = max(value, _display_floors.get(param, 0.0))
                 low_label, high_label = _meta_labels.get(param, ("LOW", "HIGH"))
-                label = high_label if value > 0.55 else (low_label if value < 0.45 else "NEUTRAL")
-                lines.append(f"    {param}: {value:.2f} ({label})")
+                label = high_label if display_val > 0.55 else (low_label if display_val < 0.45 else "NEUTRAL")
+                lines.append(f"    {param}: {display_val:.2f} ({label})")
 
         # Recent trades
         if self.recent_trades:
@@ -518,8 +536,8 @@ class MarketSnapshot:
             lines.append(f"  DCA safety: SL={dca_sl:+.1%}, hold={dca_hold_m:.0f}min (after ADD)")
             lines.append(f"  Safety is a backstop — aim to exit on your own judgment before it triggers.")
             lines.append(f"  MFE/MAE guide: MFE=best unrealized profit, MAE=worst drawdown, capture=PnL/MFE.")
-            lines.append(f"  → MFE>0 + PnL dropping: normal pullback if small. Only exit if thesis INVALIDATED.")
-            lines.append(f"  → MFE=0% after 10+min: thesis never worked. Cut immediately.")
+            lines.append(f"  → MFE/MAE are INFORMATIONAL context for your judgment, not exit triggers.")
+            lines.append(f"  → Use H-TS meta-params (loss_tolerance, hold_patience) to calibrate your exit timing.")
             _fee_pct = self.safety_config.get("round_trip_fee", 0.0004) * 100
             lines.append(f"  → Do NOT exit just because capture% is falling. Target profit > {_fee_pct:.1f}% (fees).")
         else:
@@ -530,6 +548,17 @@ class MarketSnapshot:
         lines.append(f"\n## Portfolio")
         lines.append(f"  Value: ${self.portfolio_value:,.2f}, Cash: ${self.cash:,.2f}")
         lines.append(f"  Trigger: {self.trigger}")
+
+        # Session Performance (daily risk context)
+        lines.append(f"\n## Session Performance (Today)")
+        lines.append(f"  Daily PnL: {self.daily_pnl_pct*100:+.1f}% | Trades: {self.daily_trade_count}/{self.max_daily_trades}")
+        if self.consecutive_losses >= 2:
+            size_pct = 25 if self.consecutive_losses >= 3 else 50
+            lines.append(f"  Consecutive losses: {self.consecutive_losses} | Drawdown: {self.drawdown_pct*100:.1f}% | Size reduced to {size_pct}%")
+        else:
+            lines.append(f"  Consecutive losses: {self.consecutive_losses} | Drawdown: {self.drawdown_pct*100:.1f}%")
+        if self.daily_pnl_pct <= -0.02:
+            lines.append(f"  ⚠ CAUTION: Significant daily loss. Be highly selective with new entries.")
 
         # Sentiment
         if self.fear_greed_index > 0 or self.etf_daily_flow_usd != 0:
@@ -565,14 +594,38 @@ class MarketSnapshot:
             lines.append(f"\n## Trading Diary (Self-Reflection)")
             lines.append(self.diary_context)
 
-        # OOD Warning (Mahalanobis distance, arXiv:2512.23773)
-        ood_tickers = {t: d for t, d in self.ood_scores.items() if d > 6.0}
-        if ood_tickers:
-            lines.append(f"\n## ⚠ OOD Warning (Out-of-Distribution Market State)")
-            lines.append("The following tickers show STATISTICALLY UNUSUAL market conditions (Mahalanobis distance > 6):")
-            for tic, dist in sorted(ood_tickers.items(), key=lambda x: -x[1]):
-                lines.append(f"  {tic}: distance={dist:.1f} — H-TS data may not apply well to this regime")
-            lines.append("H-TS posteriors were learned from normal conditions. Weigh this information in your decision.")
+        # OOD Warning — Kinlaw-Turkington decomposition (magnitude vs correlation surprise)
+        if self.ood_decomposed:
+            structural_breaks = {}
+            magnitude_spikes = {}
+            for tic, decomp in self.ood_decomposed.items():
+                total = decomp.get("total", 0)
+                correlation = decomp.get("correlation", 1.0)
+                if correlation > 1.5 and total > 6.0:
+                    structural_breaks[tic] = decomp
+                elif total > 6.0:
+                    magnitude_spikes[tic] = decomp
+            if structural_breaks:
+                lines.append(f"\n## ⚠ STRUCTURAL BREAK (Correlation Surprise)")
+                lines.append("Correlations between indicators have BROKEN DOWN — regime shift detected:")
+                for tic, decomp in sorted(structural_breaks.items(), key=lambda x: -x[1]["total"]):
+                    lines.append(f"  {tic}: total={decomp['total']:.1f}, magnitude={decomp['magnitude']:.1f}, "
+                                 f"correlation={decomp['correlation']:.2f}")
+                lines.append("H-TS posteriors may not apply well. Exercise extreme caution with new entries.")
+            if magnitude_spikes:
+                lines.append(f"\n## 📊 Large Move — Magnitude Surprise (correlations intact)")
+                lines.append("Big price moves detected, but indicator correlations remain normal:")
+                for tic, decomp in sorted(magnitude_spikes.items(), key=lambda x: -x[1]["total"]):
+                    lines.append(f"  {tic}: total={decomp['total']:.1f}, magnitude={decomp['magnitude']:.1f}, "
+                                 f"correlation={decomp['correlation']:.2f}")
+                lines.append("H-TS posteriors remain applicable. This may be an opportunity.")
+        elif self.ood_scores:
+            # Fallback: no decomposition available yet (insufficient data)
+            ood_tickers = {t: d for t, d in self.ood_scores.items() if d > 6.0}
+            if ood_tickers:
+                lines.append(f"\n## ⚠ OOD Warning (Out-of-Distribution Market State)")
+                for tic, dist in sorted(ood_tickers.items(), key=lambda x: -x[1]):
+                    lines.append(f"  {tic}: distance={dist:.1f}")
 
         return "\n".join(lines)
 
@@ -667,10 +720,10 @@ Use as calibration, not rules. H-TS learns which multiples work per regime.
 ### Exit Guidelines — R:R is EVERYTHING:
 **Your avg win MUST exceed your avg loss.** Exiting at +0.05% while losing -0.20% means you need 80% WR just to break even.
 - **Minimum profit target: 2x ATR(5m) or +0.15%, whichever is larger.** Exits below this are fee losses.
-- **Do NOT exit a winner just because MFE is declining.** Small MFE pullbacks (< 0.1%) are noise. Only exit when your exit THESIS is invalidated.
-- **MFE/MAE in Open Positions are INFORMATIONAL, not exit triggers.** Low capture on a small move means "hold longer", not "take what you have".
-- **Let winners run. Cut losers.** If MFE=+0.00% after 10+ min → thesis failed, exit. If MFE > +0.10% → the direction was right, hold for target.
-- Target profit and stop loss are YOUR judgment call. H-TS will learn what works.
+- **MFE/MAE are CONTEXT, not rules.** They help you understand how the trade has behaved, but exit decisions should be based on your market analysis + H-TS meta-params.
+- **Let H-TS guide exit timing.** hold_patience tells you how long winners have needed to develop. loss_tolerance tells you how much room losers should get. TRUST these learned parameters.
+- **Do NOT exit just because MFE=0% early on.** Trades need time to develop — especially in volatile regimes. A 5m entry signal needs at least 15-30min to play out.
+- Target profit and stop loss are YOUR judgment call informed by H-TS. Safety layer is the hard backstop.
 - Safety layer provides backstop (hard SL, TP, time stop, trailing) — see Open Positions section.
 - Max hold is {max_hold_hrs:.0f}h (safety backstop).
 
@@ -695,12 +748,12 @@ Use these as information, not constraints. H-TS learns over time — today's UNR
 H-TS also learns *how* to trade per regime via 6 meta-parameters (0.0 to 1.0):
 - **position_scale**: How large to size positions. Low (<0.45) → size down. High (>0.55) → full size.
 - **entry_selectivity**: How picky to be. Low → take more setups. High → only high-confluence.
-- **hold_patience**: Profit target sizing. Low → tighter targets and stops. High → give trades room to develop.
+- **hold_patience**: How long to hold before exiting. Low (<0.4) → quick scalp exits. Mid (0.4-0.6) → hold 15-60min for thesis to develop. High (>0.6) → swing trades, hold hours.
 - **trade_frequency**: How often to trade. Low → be selective. High → stay active.
 - **trend_vs_reversion**: Strategy style. Low → mean-reversion. High → trend-following.
 - **risk_aversion**: Risk appetite. Low → aggressive. High → conservative/defensive.
 - **profit_target_width**: Exit timing for winners. Low → take profit quickly (tight TP). High → let winners run (wide TP).
-- **loss_tolerance**: Cut-loss speed. Low → cut losses fast. High → give losing trades room to recover.
+- **loss_tolerance**: How much unrealized loss to tolerate before cutting. Low (<0.3) → cut at -0.2~0.3%. Mid (0.3-0.6) → tolerate -0.5% drawdown. High (>0.6) → give room up to -1%.
 
 These are learned from your trade history in each regime. Use them as guidance — they reflect what has *actually worked*.
 If meta-params say SIZE DOWN + BE PICKY + RISK-OFF, the regime has been punishing aggressive trading.
@@ -723,7 +776,7 @@ If meta-params say SIZE DOWN + BE PICKY + RISK-OFF, the regime has been punishin
 ## PRINCIPLES (guidelines, not rigid rules — H-TS data should drive your evolution)
 - **R:R > 1.0 is non-negotiable.** Each trade should risk X to make at least X. Exiting at +0.03% profit is WORSE than holding — it's a fee loss that counts as a "win" but loses money.
 - **Let winners breathe.** Small pullbacks from MFE are normal. Only exit when your thesis is clearly invalidated (e.g., key level broken, momentum reversal on higher TF).
-- **Cut losers decisively.** If MFE stays near zero after 10+ min, the thesis was wrong — exit without waiting.
+- **Use hold_patience + loss_tolerance for exit timing.** These meta-params are learned from YOUR trade history — they reflect what has actually worked in this regime. Don't override them with arbitrary time rules.
 - **Quality over quantity.** Skip marginal setups — they just generate fee losses. HOLD is free.
 - **Honest signal_weights matter.** Rate which specific signals influenced your decision [-1.0, +1.0]. H-TS uses these to learn at both group and signal level.
 - **Be SPECIFIC.** Don't just say "momentum". Say "ema_cross_fast" or "trend_strength".

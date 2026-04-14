@@ -43,16 +43,15 @@ class MetaUpdateMixin:
         eff_selectivity = pnl_pct * conf_scale
         meta_updates["entry_selectivity"] = eff_selectivity
 
-        # 3. hold_patience: ASYMMETRIC — break the early-exit vicious cycle
-        _MIN_PATIENCE_HOLD = 0.25  # hours (15 min)
+        # 3. hold_patience: duration-weighted reward (arXiv:2105.08877)
+        # 수익: 오래 hold할수록 보상↑ (patience↑ 유도)
+        # 손실: hold 시간에 비례하여 벌칙 (짧은 손절=작은 벌칙, 긴 손절=큰 벌칙)
         if pnl_pct >= 0:
             hold_scale = max(min(held_hours / 0.5, 2.0), 0.3)
             eff_patience = pnl_pct * hold_scale
-        elif held_hours >= _MIN_PATIENCE_HOLD:
-            hold_scale = min(held_hours / 0.5, 2.0)
-            eff_patience = pnl_pct * hold_scale
         else:
-            eff_patience = 0.0
+            hold_scale = max(min(held_hours / 0.5, 2.0), 0.1)
+            eff_patience = pnl_pct * hold_scale
         meta_updates["hold_patience"] = eff_patience
 
         # 4. trade_frequency: pure outcome
@@ -116,7 +115,7 @@ class MetaUpdateMixin:
                     mb.update(pnl_pct=eff_pnl, discount=disc)
 
         # Soft regularization anchors (arXiv:2602.06014)
-        _META_ANCHORS = {"hold_patience": (0.50, 0.02), "trade_frequency": (0.40, 0.02)}
+        _META_ANCHORS = {"hold_patience": (0.50, 0.005), "trade_frequency": (0.40, 0.005)}
         for param, (anchor_mean, pull_strength) in _META_ANCHORS.items():
             for r in target_regimes:
                 mb = self._meta_betas.get(r, {}).get(param)
