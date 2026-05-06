@@ -136,8 +136,8 @@ CRYPTO_RISK_CONFIG = {
     "dca_trail_width_pct": 0.015,         # 1.5% width
     # Daily risk management — execution-layer edge leak prevention
     "max_daily_loss_pct": 0.03,           # -3% daily loss → stop new entries for the day
-    "max_daily_trades": 10,               # max 10 trades per day (force selectivity)
-    "max_hourly_trades": 5,               # max 5 trades per hour (cascade prevention)
+    "max_daily_trades": 100,              # no practical limit — H-TS needs volume to learn
+    "max_hourly_trades": 20,              # relaxed — let H-TS learn from volume
     "drawdown_reduce_threshold": 0.05,    # -5% drawdown from session peak → position size 50%
 }
 

@@ -22,8 +22,8 @@ class RegimeMixin:
     def _get_adaptive_discount(self, regime: str) -> float:
         """Return regime-dependent adaptive discount rate.
 
-        - Regime just changed (streak <= 1): fast discount (0.92)
-        - Stable regime (streak >= 5):       slow discount (0.995)
+        - Regime just changed (streak <= 1): fast discount (0.97)
+        - Stable regime (streak >= 5):       slow discount (0.999)
         - Transitional (2-4 trades):         default discount
         """
         if regime in (None, "unknown", _GLOBAL_REGIME):
@@ -33,10 +33,10 @@ class RegimeMixin:
             return self._group_discount
 
         if regime != self._last_regime:
-            return 0.92
+            return 0.97  # was 0.92 — too aggressive, erased learning on regime change
 
         if self._regime_streak >= 5:
-            return min(0.99, self._group_discount + 0.005)
+            return min(0.999, self._group_discount + 0.001)
 
         return self._group_discount
 

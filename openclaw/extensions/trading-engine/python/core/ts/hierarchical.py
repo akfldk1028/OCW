@@ -66,8 +66,8 @@ class HierarchicalOnlineLearner(
         save_path: Optional[str] = None,
         min_trades_to_adapt: int = 5,
         max_window: int = 100,
-        group_discount: float = 0.985,
-        signal_discount: float = 0.998,
+        group_discount: float = 0.998,
+        signal_discount: float = 0.999,
     ) -> None:
         self._save_path = Path(save_path) if save_path else None
         self._min_trades = min_trades_to_adapt
@@ -94,6 +94,7 @@ class HierarchicalOnlineLearner(
         }
 
         self._trades: List[TradeRecord] = []
+        self._total_trades_count: int = 0
         self._total_pnl: float = 0.0
         self._regime_trade_counts: Dict[str, int] = {_GLOBAL_REGIME: 0}
 
@@ -106,7 +107,7 @@ class HierarchicalOnlineLearner(
 
     @property
     def total_trades(self) -> int:
-        return len(self._trades)
+        return max(self._total_trades_count, len(self._trades))
 
     @property
     def total_trades_today(self) -> int:

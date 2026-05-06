@@ -12,7 +12,7 @@ _GLOBAL_REGIME = "_global"
 # 10 = practical minimum for crypto scalping (fast regime cycles).
 _MIN_REGIME_TRADES = 10
 
-# 6 groups × 5-6 signals each = 32 total signals
+# 7 groups × 4-6 signals each = 36 total signals
 SIGNAL_GROUPS: Dict[str, List[str]] = {
     "technical_trend": [
         "ema_cross_fast",       # EMA(9) vs EMA(21) crossover
@@ -57,6 +57,12 @@ SIGNAL_GROUPS: Dict[str, List[str]] = {
         "dxy_direction",        # Dollar index direction
         "etf_flow",             # BTC ETF daily net flow
         "stablecoin_flow",      # Stablecoin supply change
+    ],
+    "prediction": [
+        "kronos_direction",     # Kronos FM: weighted-avg predicted return direction [-1, +1]
+        "kronos_magnitude",     # Kronos FM: predicted move magnitude [0, 1]
+        "kronos_confidence",    # Kronos FM: sample agreement (1 - CV) [0, 1]
+        "kronos_trend_alignment",  # Kronos FM: prediction × TA trend agreement [-1, +1]
     ],
 }
 

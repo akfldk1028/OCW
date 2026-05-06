@@ -150,6 +150,10 @@ class PersistenceMixin:
 
             self._regime_trade_counts = state.get("regime_trade_counts", {_GLOBAL_REGIME: 0})
             self._total_pnl = state.get("total_pnl", 0.0)
+            self._total_trades_count = max(
+                int(state.get("total_trades", 0)),
+                int(self._regime_trade_counts.get(_GLOBAL_REGIME, 0)),
+            )
 
             ad_state = state.get("adaptive_discount", {})
             self._last_regime = ad_state.get("last_regime")
@@ -223,6 +227,7 @@ class PersistenceMixin:
 
         old_trades = list(self._trades)
         self._trades = []
+        self._total_trades_count = 0
         self._total_pnl = 0.0
         self._regime_trade_counts = {_GLOBAL_REGIME: 0}
 
@@ -277,6 +282,7 @@ class PersistenceMixin:
             },
         }
         self._trades = []
+        self._total_trades_count = 0
         self._total_pnl = 0.0
         self._regime_trade_counts = {_GLOBAL_REGIME: 0}
         self._last_regime = None

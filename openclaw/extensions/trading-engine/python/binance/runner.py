@@ -56,6 +56,7 @@ from core.memory_store import TradingMemory
 from core.liquidation_tracker import LiquidationTracker
 from core.ood_detector import OODDetector
 from core.exit_regret_tracker import ExitRegretTracker, ExitSnapshot
+from core.kronos_provider import KronosProvider
 from analysis.regime_detector_crypto import CryptoRegimeDetector
 from analysis.macro_regime import MacroRegimeDetector
 
@@ -190,6 +191,9 @@ class CryptoRunner:
         self.ood_detectors: Dict[str, OODDetector] = {
             t: OODDetector(window=200, min_samples=30) for t in cfg["tickers"]
         }
+
+        # Kronos Foundation Model: prediction signals (lazy-loaded)
+        self.kronos_provider = KronosProvider()
 
         # Position tracker
         self.position_tracker = PositionTracker(
@@ -556,11 +560,15 @@ class CryptoRunner:
     # Counterfactual learning helpers
     # ------------------------------------------------------------------
 
-    def _extract_ta_signals(self, ticker: str, snapshot: MarketSnapshot) -> Dict[str, float]:
+    def _extract_ta_signals(self, ticker: str, snapshot: MarketSnapshot, include_kronos: bool = True) -> Dict[str, float]:
         """Extract TA-derived signals from snapshot for H-TS virtual updates.
 
         Used for both counterfactual snapshots and entry-time TA capture.
         Maps raw TA indicators (15m) → normalized signal values in [-1, 1].
+
+        Args:
+            include_kronos: If False, skip Kronos prediction (avoids blocking
+                           inference in OOD-only calls).
         """
         ta_signals: Dict[str, float] = {}
         price = snapshot.ticker_prices.get(ticker, 0)
@@ -803,7 +811,34 @@ class CryptoRunner:
         if isinstance(exflow, (int, float)) and abs(exflow) > 0.1:
             ta_signals["exchange_flow"] = max(-1.0, min(1.0, exflow))
 
+        # Kronos Foundation Model predictions (skip for OOD-only calls)
+        if include_kronos and hasattr(self, 'kronos_provider'):
+            # Determine current TA trend for alignment signal
+            ema_status = ta.get("ema_cross", {}).get("status", "")
+            kronos_signals = self.kronos_provider.get_signals(
+                ticker=ticker,
+                ohlcv_bars=self.ohlcv_store.get_bars(ticker, "1h", 500),
+                current_trend=ema_status,
+            )
+            ta_signals.update(kronos_signals)
+
         return ta_signals
+
+    def _get_kronos_predictions(self, tickers: list) -> Dict[str, Dict[str, float]]:
+        """Collect cached Kronos prediction summaries for prompt display."""
+        result: Dict[str, Dict[str, float]] = {}
+        if not hasattr(self, 'kronos_provider'):
+            return result
+        for tic in tickers:
+            raw = self.kronos_provider.get_raw_predictions(tic)
+            if raw:
+                result[tic] = {
+                    "direction": raw.get("mean_return", 0),
+                    "pred_close": raw.get("pred_closes_mean", 0),
+                    "current_close": raw.get("current_close", 0),
+                    "horizon_h": raw.get("pred_horizon_h", 12),
+                }
+        return result
 
     def _save_hold_snapshot(self, snapshot: MarketSnapshot) -> None:
         """Save price+TA snapshot when Claude decides HOLD (no trades).
@@ -1223,7 +1258,7 @@ class CryptoRunner:
                 # Clean up _entry_prices for ANY exit (safety or claude)
                 self._entry_prices.pop(ticker, None)
                 # Anti-churn cooldown for safety exits too
-                self._exit_cooldowns[ticker] = time.time() + 30  # 30s cooldown — agent decides re-entry
+                self._exit_cooldowns[ticker] = time.time() + 300  # 5min cooldown — prevent churn re-entry
                 self._save_state()
 
                 # Log safety exits to CSV (claude exits are logged in _run_decision)
@@ -1397,8 +1432,13 @@ class CryptoRunner:
             # Path 1: Candle close — full feature evaluation
             # price_change_pct = close-to-close, volume = candle volume
             features = self._compute_tick_features(ticker, price, payload)
+
+            # Suppress candle_close wake when holding positions (prevent premature exits)
+            # Only 1h primary candle or zscore extremes should wake during holds
+            has_positions = bool(self._entry_prices)
+            suppress_candle = has_positions and interval != primary
             should_wake, reasons = self.adaptive_gate.evaluate(
-                features, is_candle_close=True)
+                features, is_candle_close=(not suppress_candle))
             if should_wake:
                 logger.info("[runner] Gate wake (%s) -> Claude deciding",
                             ", ".join(reasons))
@@ -2119,7 +2159,7 @@ class CryptoRunner:
                     if "basis_annualized" in info
                 },
                 candidates=candidates,
-            ))
+            ), include_kronos=False)  # OOD: skip Kronos to avoid blocking inference
             if ta_signals:
                 ood = self.ood_detectors.get(tic)
                 if ood is None:
@@ -2229,6 +2269,7 @@ class CryptoRunner:
             liquidation_contexts=liq_contexts,
             ood_scores=ood_scores,
             ood_decomposed=ood_decomposed,
+            kronos_predictions=self._get_kronos_predictions(candidates),
         )
 
     # ------------------------------------------------------------------
@@ -2517,7 +2558,7 @@ class CryptoRunner:
 
                         sell_qty = tracked.qty if tracked else 0
                         # Anti-churn: set 10-minute cooldown for this ticker
-                        self._exit_cooldowns[ticker] = time.time() + 30  # 30s cooldown — agent decides re-entry
+                        self._exit_cooldowns[ticker] = time.time() + 300  # 5min cooldown — prevent churn re-entry
 
                         decision_src = d.get("decision_source", "claude_agent")
                         _sell_side = tracked.side if tracked else "long"
@@ -2742,10 +2783,15 @@ class CryptoRunner:
 
             # Loss streak anti-martingale sizing
             if action in ("BUY", "SHORT") and self._consecutive_losses >= 2:
-                streak_factor = 0.25 if self._consecutive_losses >= 3 else 0.50
+                streak_factor = 0.50 if self._consecutive_losses >= 3 else 0.75
                 position_pct *= streak_factor
-                logger.info("[risk] %d consecutive losses → size ×%.0f%%",
-                            self._consecutive_losses, streak_factor * 100)
+                logger.info("[risk] %d consecutive losses → size ×%.0f%% (effective %.1f%%)",
+                            self._consecutive_losses, streak_factor * 100, position_pct * 100)
+
+            # Floor: minimum 5% position — dust trades have no edge (applied after all reductions)
+            if action in ("BUY", "SHORT") and position_pct < 0.05:
+                logger.info("[risk] Position %.1f%% below floor → bumped to 5%%", position_pct * 100)
+                position_pct = 0.05
 
             # Enforce max portfolio exposure (CRYPTO_RISK_CONFIG["max_exposure_pct"])
             if action in ("BUY", "SHORT"):
@@ -3028,6 +3074,129 @@ class CryptoRunner:
                 except Exception as exc:
                     logger.error("[watchdog] Decision failed: %s", exc)
 
+    async def _rest_kline_poller(self) -> None:
+        """REST fallback when Binance fstream kline WS returns 0 messages.
+
+        Fetches latest 2 candles per ticker × interval every 60s. Closed
+        candles are appended to ohlcv_store and re-emitted on the event bus
+        in market_listener kline format, so multi_tf_aggregator and the gate
+        keep working. The open (live) candle's close updates last_tick_prices
+        so _run_decision passes the WS warmup check.
+        """
+        cfg = ACTIVE_BLEND_CONFIG
+        intervals = EVENT_CONFIG.get("kline_intervals", ["5m", "15m", "1h"])
+        seen_close_ts: Dict[tuple, int] = {}
+
+        while not self._shutdown_event.is_set():
+            ws_age = time.time() - max(
+                getattr(self.market_listener, "_last_message_time", 0) or 0,
+                0.0,
+            )
+            ws_alive = ws_age < 120
+
+            try:
+                await asyncio.wait_for(
+                    self._shutdown_event.wait(), timeout=60
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+
+            if ws_alive:
+                continue
+
+            for ticker in cfg["tickers"]:
+                for interval in intervals:
+                    try:
+                        bars = await asyncio.to_thread(
+                            self.broker.fetch_ohlcv, ticker, interval, 2
+                        )
+                    except Exception as exc:
+                        logger.warning("[rest_kline] %s/%s fetch failed: %s",
+                                       ticker, interval, exc)
+                        continue
+                    if not bars or len(bars) < 1:
+                        continue
+
+                    # Last bar in list is the in-progress candle; preceding is closed.
+                    live = bars[-1]
+                    closed = bars[-2] if len(bars) >= 2 else None
+
+                    symbol = ticker.replace("/", "")
+
+                    if closed:
+                        ts_ms = int(closed[0])
+                        key = (ticker, interval)
+                        if seen_close_ts.get(key, 0) < ts_ms:
+                            seen_close_ts[key] = ts_ms
+                            kline = {
+                                "t": ts_ms,
+                                "o": closed[1], "h": closed[2],
+                                "l": closed[3], "c": closed[4],
+                                "v": closed[5], "i": interval, "x": True,
+                            }
+                            try:
+                                await self.market_listener._handle_kline(
+                                    {"k": kline, "s": symbol}
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "[rest_kline] handle closed %s/%s: %s",
+                                    ticker, interval, exc)
+
+                    # Open candle: publish a non-closed tick to refresh prices.
+                    if live:
+                        kline = {
+                            "t": int(live[0]),
+                            "o": live[1], "h": live[2],
+                            "l": live[3], "c": live[4],
+                            "v": live[5], "i": interval, "x": False,
+                        }
+                        try:
+                            await self.market_listener._handle_kline(
+                                {"k": kline, "s": symbol}
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "[rest_kline] handle live %s/%s: %s",
+                                ticker, interval, exc)
+
+            logger.info("[rest_kline] Polled %d tickers × %d intervals (ws_age=%.0fs)",
+                        len(cfg["tickers"]), len(intervals), ws_age)
+
+    async def _scout_loop(self) -> None:
+        """Wake Claude periodically when no positions are held.
+
+        position_tracker only calls Claude for held positions. AdaptiveGate
+        wake conditions are set by Claude itself. So with zero positions and
+        no Claude wake conditions yet, only the 1h watchdog can trigger entry.
+        Scout closes that gap — re-evaluates entry every scout_interval.
+        """
+        scout_interval = 300  # 5 min
+        while not self._shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._shutdown_event.wait(), timeout=scout_interval
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+
+            if self.position_tracker._positions:
+                continue
+
+            last_tick_age = time.time() - max(
+                (self.market_listener._last_message_time
+                 if hasattr(self.market_listener, "_last_message_time") else 0),
+                0.0,
+            )
+            logger.info("[scout] Triggering decision (last_tick_age=%.0fs)", last_tick_age)
+
+            try:
+                await self._run_decision(trigger="scout")
+            except Exception as exc:
+                logger.error("[scout] Decision failed: %s", exc)
+
     async def _heartbeat_loop(self) -> None:
         """Write heartbeat file every 30s for Docker healthcheck."""
         hb_path = DATA_DIR / "heartbeat"
@@ -3089,6 +3258,8 @@ class CryptoRunner:
             asyncio.create_task(self.position_tracker.run(), name="position_tracker"),
             asyncio.create_task(self._heartbeat_loop(), name="heartbeat"),
             asyncio.create_task(self._watchdog_loop(), name="watchdog"),
+            asyncio.create_task(self._scout_loop(), name="scout"),
+            asyncio.create_task(self._rest_kline_poller(), name="rest_kline_poller"),
         ]
 
         # Dashboard API (optional, non-fatal if port in use)

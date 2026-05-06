@@ -58,6 +58,7 @@ class RecordingMixin:
             position_side=position_side,
         )
         self._trades.append(record)
+        self._total_trades_count += 1
         self._total_pnl += pnl_pct
 
         # Trades held < 5 min: skip signal updates, but still learn meta-params

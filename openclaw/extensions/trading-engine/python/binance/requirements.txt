@@ -34,5 +34,11 @@ yfinance>=0.2.30
 # Scheduler (equity cron — optional)
 apscheduler>=3.10
 
+# Kronos Foundation Model (OHLCV prediction)
+torch>=2.0
+einops>=0.7
+safetensors>=0.4
+huggingface_hub>=0.20
+
 # Testing
 pytest>=8.0

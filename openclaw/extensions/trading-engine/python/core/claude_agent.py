@@ -216,6 +216,10 @@ class MarketSnapshot:
     # OOD decomposed scores per ticker {ticker: {total, magnitude, correlation}}
     ood_decomposed: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
+    # Kronos Foundation Model predictions per ticker
+    # {ticker: {direction, pred_close, current_close, horizon_h}}
+    kronos_predictions: Dict[str, Dict[str, float]] = field(default_factory=dict)
+
     # Daily risk context (session performance for Claude awareness)
     daily_pnl_pct: float = 0.0
     daily_trade_count: int = 0
@@ -429,12 +433,14 @@ class MarketSnapshot:
 
         # Group-level weights (Level 1)
         if self.ts_group_weights:
-            lines.append(f"\n  GROUP RELIABILITY (Level 1 — which analysis category works?):")
+            n_groups = max(len(self.ts_group_weights), 1)
+            even_pct = 100.0 / n_groups  # 7 groups → 14.3% is neutral
+            lines.append(f"\n  GROUP RELIABILITY (Level 1 — which analysis category works? baseline={even_pct:.1f}%):")
             for group, gw in sorted(self.ts_group_weights.items(), key=lambda x: -x[1]):
                 pct = gw * 100
-                if pct > 18:
+                if pct > even_pct * 1.25:
                     tag = "★ STRONG"
-                elif pct > 15:
+                elif pct > even_pct * 0.85:
                     tag = "average"
                 else:
                     tag = "weak"
@@ -593,6 +599,34 @@ class MarketSnapshot:
         if self.diary_context:
             lines.append(f"\n## Trading Diary (Self-Reflection)")
             lines.append(self.diary_context)
+
+        # Kronos AI Predictions (Foundation Model — 12h ahead, 5 samples)
+        if self.kronos_predictions:
+            lines.append(f"\n## Kronos AI Predictions (Foundation Model — FORWARD-LOOKING)")
+            for tic, pred in self.kronos_predictions.items():
+                direction = pred.get("direction", 0)
+                pred_close = pred.get("pred_close", 0)
+                current_close = pred.get("current_close", 0)
+                horizon = pred.get("horizon_h", 12)
+                if current_close > 0 and pred_close > 0:
+                    pct_chg = (pred_close - current_close) / current_close * 100
+                    label = "BULLISH" if direction > 0.005 else "BEARISH" if direction < -0.005 else "NEUTRAL"
+                    strength = ""
+                    if abs(pct_chg) > 2.0:
+                        strength = " ⚠ STRONG"
+                    lines.append(
+                        f"  {tic}: {label} ({pct_chg:+.2f}% in {horizon}h) "
+                        f"now={current_close:,.0f} → pred={pred_close:,.0f}{strength}"
+                    )
+            # Consensus check — if all tickers agree on direction
+            directions = [p.get("direction", 0) for p in self.kronos_predictions.values()]
+            if directions:
+                all_bear = all(d < -0.005 for d in directions)
+                all_bull = all(d > 0.005 for d in directions)
+                if all_bear:
+                    lines.append("  ⚠ KRONOS CONSENSUS: ALL BEARISH — entering LONG against this is high-risk")
+                elif all_bull:
+                    lines.append("  ⚠ KRONOS CONSENSUS: ALL BULLISH — entering SHORT against this is high-risk")
 
         # OOD Warning — Kinlaw-Turkington decomposition (magnitude vs correlation surprise)
         if self.ood_decomposed:
@@ -784,7 +818,7 @@ If meta-params say SIZE DOWN + BE PICKY + RISK-OFF, the regime has been punishin
 - **Account for fees.** Round-trip cost is ~{fee_pct:.1f}%. Gross profit must exceed this to be a real win. A +0.05% exit is a NET LOSS after fees.
 - **Crisis = opportunity.** Sharp drops with high volume can be the best scalp entries.
 
-## SIGNAL CATEGORIES (28 signals in 6 groups)
+## SIGNAL CATEGORIES (36 signals in 7 groups)
 Rate ONLY the signals that actually influenced your decision. Use exact names below.
 
 **technical_trend**: ema_cross_fast, ema_cross_slow, macd_histogram, trend_strength, supertrend
@@ -793,6 +827,7 @@ Rate ONLY the signals that actually influenced your decision. Use exact names be
 **derivatives**: funding_rate, oi_change, long_short_ratio, liquidation_level, basis_spread
 **sentiment**: news_sentiment, fear_greed, social_buzz, whale_activity, exchange_flow
 **macro**: market_regime, volatility_regime, btc_dominance, dxy_direction, etf_flow, stablecoin_flow
+**prediction**: kronos_direction, kronos_magnitude, kronos_confidence, kronos_trend_alignment
 
 ## WORKFLOW
 1. Read the market snapshot — all TA indicators are pre-computed for 5m/15m/1h
